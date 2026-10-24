@@ -1,0 +1,236 @@
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Shaders/ShaderRegistry.cpp b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Shaders/ShaderRegistry.cpp
+index 68a6251..0a0ba61 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Shaders/ShaderRegistry.cpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Shaders/ShaderRegistry.cpp
+@@ -435,13 +435,13 @@ ShaderRecompiler::PreparedShaderInvocation InvocationFor(const ShaderSnapshot& s
+         if (!linked.empty() && !std::ranges::equal(code, linked)) continue;
+         if (!invocationRequest) invocationRequest.emplace(source);
+         invocationRequest->shader.code = code;
+-        if (auto invocation = ShaderRecompiler::PreparedShaderInvocation::TryCreate(*invocationRequest, entry.handle, key)) return std::move(*invocation);
++        if (auto invocation = ShaderRecompiler::PreparedShaderInvocation::TryCreate(std::move(*invocationRequest), entry.handle, key)) return std::move(*invocation);
+     }
+     ReportPreparedAtUse(snapshot, source);
+     auto handle = PrepareShaderWithDiagnostics(source);
+     invocationRequest.emplace(source);
+     invocationRequest->shader.code = ShaderRecompiler::GetPreparedCode(*handle);
+-    auto invocation = ShaderRecompiler::PreparedShaderInvocation::TryCreate(*invocationRequest, handle, key);
++    auto invocation = ShaderRecompiler::PreparedShaderInvocation::TryCreate(std::move(*invocationRequest), handle, key);
+     if (!invocation.has_value()) throw std::runtime_error("AGC driver: an artifact prepared at use does not match its invocation");
+     snapshot.prepared->entries.push_back({codeOffset, std::move(handle)});
+     return std::move(*invocation);
+diff --git a/core/shader/recompiler/Optimization/include/Optimization/ResourceProgram.hpp b/core/shader/recompiler/Optimization/include/Optimization/ResourceProgram.hpp
+index f23d1b8..1c0b0b0 100644
+--- a/core/shader/recompiler/Optimization/include/Optimization/ResourceProgram.hpp
++++ b/core/shader/recompiler/Optimization/include/Optimization/ResourceProgram.hpp
+@@ -54,13 +54,17 @@ class PreparedShaderInvocation {
+ public:
+     static std::optional<PreparedShaderInvocation> TryCreate(const RecompileRequest& request, const std::shared_ptr<const SourceHandle>& handle);
+     static std::optional<PreparedShaderInvocation> TryCreate(const RecompileRequest& request, const std::shared_ptr<const SourceHandle>& handle, std::span<const std::uint64_t> key);
+-    const RecompileRequest& Request() const { return request; }
++    // Takes the request over only when the invocation is created (a mismatch leaves it untouched).
++    static std::optional<PreparedShaderInvocation> TryCreate(RecompileRequest&& request, const std::shared_ptr<const SourceHandle>& handle, std::span<const std::uint64_t> key);
++    const RecompileRequest& Request() const { return *request; }
+     std::shared_ptr<const ResourceCapture> Capture(const SrtRuntime& runtime) const;
+     std::shared_ptr<const RecompileResult> Materialize(const ResourceCapture& capture) const;
+ 
+ private:
+-    PreparedShaderInvocation(const RecompileRequest& request, const std::shared_ptr<const SourceHandle>& handle);
+-    RecompileRequest request;
++    PreparedShaderInvocation(RecompileRequest request, const std::shared_ptr<const SourceHandle>& handle);
++    // The request is a few KiB of stage tables and an invocation is made, moved and returned for
++    // every draw stage: shared, a move is a pointer move instead of a copy of the tables.
++    std::shared_ptr<const RecompileRequest> request;
+     std::shared_ptr<const SourceHandle> handle;
+ };
+ [[nodiscard]] std::span<const std::uint32_t> GetPreparedCode(const SourceHandle& handle);
+diff --git a/core/shader/recompiler/Optimization/include/Optimization/SrtWalker/SrtEvaluator.hpp b/core/shader/recompiler/Optimization/include/Optimization/SrtWalker/SrtEvaluator.hpp
+index 8332618..3e1b44b 100644
+--- a/core/shader/recompiler/Optimization/include/Optimization/SrtWalker/SrtEvaluator.hpp
++++ b/core/shader/recompiler/Optimization/include/Optimization/SrtWalker/SrtEvaluator.hpp
+@@ -4,20 +4,31 @@
+ #include "IntermediateRepresentation/IrProgram.hpp"
+ #include "Optimization/SrtWalker.hpp"
+ 
++#include <algorithm>
++#include <array>
+ #include <cstdint>
+ #include <span>
+ #include <vector>
+ 
+ namespace ShaderRecompiler::Detail {
+ 
++// Open-addressed IrValue* -> value table. The first 64 slots live in the object: an evaluator is
++// built per draw stage (twice per walk, once more per ReadFirstLane), and the heap table it grew
++// into on its first insert was an allocation, a 1 KiB clear and a free on the driver thread.
+ class EvaluatedValues {
+ public:
++    EvaluatedValues() = default;
++    EvaluatedValues(const EvaluatedValues&) = delete;
++    EvaluatedValues& operator=(const EvaluatedValues&) = delete;
++
+     bool Find(const IrValue* key, std::uint64_t& value) const {
+-        if (_slots.empty()) {
++        if (_count == 0) {
+             return false;
+         }
+-        for (std::size_t index = Home(key);; index = (index + 1u) & (_slots.size() - 1u)) {
+-            const auto& slot = _slots[index];
++        const Slot* slots = Slots();
++        const std::size_t mask = Capacity() - 1u;
++        for (std::size_t index = Home(key, mask);; index = (index + 1u) & mask) {
++            const auto& slot = slots[index];
+             if (slot.key == key) {
+                 value = slot.value;
+                 return true;
+@@ -28,11 +39,13 @@ public:
+         }
+     }
+     void Insert(const IrValue* key, std::uint64_t value) {
+-        if ((_count + 1u) * 2u > _slots.size()) {
++        if ((_count + 1u) * 2u > Capacity()) {
+             Grow();
+         }
+-        for (std::size_t index = Home(key);; index = (index + 1u) & (_slots.size() - 1u)) {
+-            auto& slot = _slots[index];
++        Slot* slots = Slots();
++        const std::size_t mask = Capacity() - 1u;
++        for (std::size_t index = Home(key, mask);; index = (index + 1u) & mask) {
++            auto& slot = slots[index];
+             if (slot.key == key) {
+                 return;
+             }
+@@ -49,23 +62,58 @@ private:
+         const IrValue* key = nullptr;
+         std::uint64_t value = 0;
+     };
+-    std::size_t Home(const IrValue* key) const {
+-        return static_cast<std::size_t>((reinterpret_cast<std::uintptr_t>(key) >> 4u) * 0x9e3779b97f4a7c15ull >> 32u) & (_slots.size() - 1u);
++    static constexpr std::size_t InlineSlots = 64;
++    static std::size_t Home(const IrValue* key, std::size_t mask) {
++        return static_cast<std::size_t>((reinterpret_cast<std::uintptr_t>(key) >> 4u) * 0x9e3779b97f4a7c15ull >> 32u) & mask;
+     }
++    std::size_t Capacity() const { return _heap.empty() ? InlineSlots : _heap.size(); }
++    Slot* Slots() { return _heap.empty() ? _inline.data() : _heap.data(); }
++    const Slot* Slots() const { return _heap.empty() ? _inline.data() : _heap.data(); }
+     void Grow() {
+-        std::vector<Slot> previous(_slots.empty() ? 64u : _slots.size() * 2u);
+-        previous.swap(_slots);
+-        _count = 0;
+-        for (const auto& slot : previous) {
+-            if (slot.key != nullptr) {
+-                Insert(slot.key, slot.value);
++        std::vector<Slot> next(Capacity() * 2u);
++        const std::size_t mask = next.size() - 1u;
++        const Slot* slots = Slots();
++        for (std::size_t i = 0; i < Capacity(); ++i) {
++            if (slots[i].key == nullptr) continue;
++            for (std::size_t index = Home(slots[i].key, mask);; index = (index + 1u) & mask) {
++                if (next[index].key == nullptr) {
++                    next[index] = slots[i];
++                    break;
++                }
+             }
+         }
++        _heap.swap(next);
+     }
+-    std::vector<Slot> _slots;
++    std::array<Slot, InlineSlots> _inline{};
++    std::vector<Slot> _heap;
+     std::size_t _count = 0;
+ };
+ 
++// The values being evaluated (a cycle guard): a walk nests a few levels deep, so the stack lives
++// in the evaluator and only a deeper walk spills to the heap.
++class VisitStack {
++public:
++    bool Contains(const IrValue* value) const {
++        const auto inlined = std::min(_size, _inline.size());
++        if (std::find(_inline.begin(), _inline.begin() + inlined, value) != _inline.begin() + inlined) return true;
++        return std::find(_overflow.begin(), _overflow.end(), value) != _overflow.end();
++    }
++    void Push(IrValue* value) {
++        if (_size < _inline.size()) _inline[_size] = value;
++        else _overflow.push_back(value);
++        ++_size;
++    }
++    void Pop() {
++        --_size;
++        if (_size >= _inline.size()) _overflow.pop_back();
++    }
++
++private:
++    std::array<IrValue*, 32> _inline{};
++    std::vector<IrValue*> _overflow;
++    std::size_t _size = 0;
++};
++
+ struct InaccessibleRead {
+     const IrValue* read = nullptr;
+     std::uint64_t address = 0;
+@@ -98,7 +146,7 @@ private:
+     InaccessibleRead* _inaccessible = nullptr;
+     std::uint32_t* _nullRoots = nullptr;
+     EvaluatedValues _cache;
+-    std::vector<IrValue*> _visiting;
++    VisitStack _visiting;
+ };
+ 
+ }
+diff --git a/core/shader/recompiler/Optimization/src/SrtWalker/SrtEvaluator.cpp b/core/shader/recompiler/Optimization/src/SrtWalker/SrtEvaluator.cpp
+index d6ce62c..94b6c06 100644
+--- a/core/shader/recompiler/Optimization/src/SrtWalker/SrtEvaluator.cpp
++++ b/core/shader/recompiler/Optimization/src/SrtWalker/SrtEvaluator.cpp
+@@ -45,13 +45,13 @@ bool Evaluator::EvaluateWide(IrValue* raw, std::uint64_t& result) {
+     if (_cache.Find(inst, result)) {
+         return true;
+     }
+-    if (std::find(_visiting.begin(), _visiting.end(), inst) != _visiting.end()) {
++    if (_visiting.Contains(inst)) {
+         return false;
+     }
+-    _visiting.push_back(inst);
++    _visiting.Push(inst);
+     std::uint64_t out = 0;
+     const bool evaluated = EvaluateInst(*inst, out);
+-    _visiting.pop_back();
++    _visiting.Pop();
+     if (!evaluated) {
+         static const bool debug = std::getenv("APS5_SRT_DEBUG") != nullptr;
+         if (debug) std::fprintf(stderr, "[srt] cannot evaluate %s (%zu arguments)\n", std::string(IrOpcodeName(inst->Opcode())).c_str(), inst->ArgumentCount());
+diff --git a/core/shader/recompiler/Recompiler.cpp b/core/shader/recompiler/Recompiler.cpp
+index 5c712bf..534707c 100644
+--- a/core/shader/recompiler/Recompiler.cpp
++++ b/core/shader/recompiler/Recompiler.cpp
+@@ -1247,7 +1247,7 @@ std::span<const std::uint32_t> GetPreparedCode(const SourceHandle& handle) {
+     return handle.source->code;
+ }
+ 
+-PreparedShaderInvocation::PreparedShaderInvocation(const RecompileRequest& request, const std::shared_ptr<const SourceHandle>& handle) : request(request), handle(handle) {}
++PreparedShaderInvocation::PreparedShaderInvocation(RecompileRequest request, const std::shared_ptr<const SourceHandle>& handle) : request(std::make_shared<const RecompileRequest>(std::move(request))), handle(handle) {}
+ 
+ std::optional<PreparedShaderInvocation> PreparedShaderInvocation::TryCreate(const RecompileRequest& request, const std::shared_ptr<const SourceHandle>& handle) {
+     struct PreparedKeyStorage {};
+@@ -1262,6 +1262,12 @@ std::optional<PreparedShaderInvocation> PreparedShaderInvocation::TryCreate(cons
+     return PreparedShaderInvocation(request, handle);
+ }
+ 
++std::optional<PreparedShaderInvocation> PreparedShaderInvocation::TryCreate(RecompileRequest&& request, const std::shared_ptr<const SourceHandle>& handle, std::span<const std::uint64_t> key) {
++    if (handle == nullptr || !MatchesPreparedShader(request, *handle, key)) return std::nullopt;
++    if (request.shader.stage != ShaderStage::Compute && request.shader.stage != ShaderStage::Fragment) static_cast<void>(RequestInputInfo(request));
++    return PreparedShaderInvocation(std::move(request), handle);
++}
++
+ std::shared_ptr<const ResourceCapture> PreparedShaderInvocation::Capture(const SrtRuntime& runtime) const {
+     auto capture = std::make_shared<ResourceCapture>();
+     capture->source = handle->source;
+@@ -1272,8 +1278,8 @@ std::shared_ptr<const ResourceCapture> PreparedShaderInvocation::Capture(const S
+ 
+ std::shared_ptr<const RecompileResult> PreparedShaderInvocation::Materialize(const ResourceCapture& capture) const {
+     if (capture.source != handle->source || capture.plan != handle->source->plan) throw std::runtime_error("ShaderRecompiler: resource capture belongs to another prepared shader");
+-    if (request.useCache && ResultMemo()) return materializePreparedMemoized(*handle->source, handle->artifact, request, capture.snapshot, true, nullptr);
+-    auto result = std::make_shared<RecompileResult>(materializeResult(*handle->artifact, request, capture.snapshot));
++    if (request->useCache && ResultMemo()) return materializePreparedMemoized(*handle->source, handle->artifact, *request, capture.snapshot, true, nullptr);
++    auto result = std::make_shared<RecompileResult>(materializeResult(*handle->artifact, *request, capture.snapshot));
+     result->cacheHit = true;
+     return result;
+ }

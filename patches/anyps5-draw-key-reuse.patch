@@ -1,0 +1,198 @@
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/include/QueueState.hpp b/core/libs/prx/libSceAgcDriver/Execution/include/QueueState.hpp
+index 7ea2ba0..3cecd95 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/include/QueueState.hpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/include/QueueState.hpp
+@@ -255,6 +255,8 @@ struct QueueState {
+     struct DrawKeyRanges {
+         std::array<std::uint64_t, 64> hashes{};
+         bool valid = false;
++        // The last key's twin without any user word (Driver::drawDecodeKey).
++        std::uint64_t decodeKey = 0;
+     };
+     mutable DrawKeyRanges drawKeyRanges;
+ 
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawCapture.cpp b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawCapture.cpp
+index db621f1..237c0fe 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawCapture.cpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawCapture.cpp
+@@ -83,8 +83,28 @@ std::shared_ptr<const ShaderRecompiler::RecompileResult> Driver::materializeDraw
+     return stageCapture.compiled;
+ }
+ 
++namespace {
++
++// Whether a draw key was seen recently: a key enters the draw cache only at its second sighting.
++// Titles that stream per-draw constants put a ring-buffer address in the user words (Mewgenics:
++// one more 256-byte slot per sprite), so most keys are never seen again, and inserting each one
++// (variant copies, an entry, an eviction freeing another) was a seventh of the queue worker.
++// One table per queue worker thread; a slot holds the last key that hashed to it.
++// APS5_NO_DRAW_KEY_FILTER=1 inserts at the first sighting again.
++bool seenDrawKey(std::uint64_t key) {
++    static const bool filter = std::getenv("APS5_NO_DRAW_KEY_FILTER") == nullptr;
++    if (!filter) return true;
++    static thread_local std::vector<std::uint64_t> seen(std::size_t{1} << 16u);
++    auto& slot = seen[(key * 0x9e3779b97f4a7c15ull) >> 48u];
++    if (slot == key) return true;
++    slot = key;
++    return false;
++}
++
++}
++
+ void Driver::cacheDrawStages(bool useDrawEntries, bool drawHit, const Pm4::DrawParameters& drawParameters, const std::optional<Graphics::IndirectDrawPath>& indirectCpu, const std::vector<DrawProgram>& programs, const std::vector<StageCapture>& stageCaptures, const std::vector<std::optional<ShaderRecompiler::ShaderVertexStageInfo>>& vertexInfos, const std::vector<std::vector<Graphics::DecodeRead>>& decodeReads, bool verifyHit, const std::vector<std::shared_ptr<DispatchVariant>>& matched, std::vector<std::shared_ptr<DispatchVariant>>& fresh, std::uint64_t drawKey, bool registerKey, const std::shared_ptr<const DrawDecode>& decode, DrawPhaseTiming& phaseTiming) {
+-    if (useDrawEntries && !drawHit && !(drawParameters.indirect && indirectCpu)) {
++    if (useDrawEntries && !drawHit && !(drawParameters.indirect && indirectCpu) && seenDrawKey(drawKey)) {
+         phaseTiming.Phase(DrawRowVectors);
+         std::uint64_t unstable = 0, mismatches = 0;
+         for (std::size_t i = 0; i < programs.size(); ++i) {
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawDecode.cpp b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawDecode.cpp
+index 713955e..fd91917 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawDecode.cpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawDecode.cpp
+@@ -2,6 +2,9 @@
+ #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
+ #include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
+ #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
++#include <algorithm>
++#include <cstdlib>
++#include <unordered_map>
+ 
+ namespace AgcDriver::DriverDetail {
+ 
+@@ -127,7 +130,61 @@ std::shared_ptr<DrawDecode> Driver::decodeDraw(const QueueState& queue, const Su
+     return product;
+ }
+ 
++namespace {
++
++// Decodes by the draw key's twin without user words (DrawKeyRanges::decodeKey), per queue worker:
++// draws that differ only in their user data (a ring-buffer address per sprite) almost never repeat
++// a draw key, so without it every draw decoded its registers again (a ninth of the queue worker).
++// APS5_NO_DECODE_CACHE=1 decodes every draw that misses the draw cache.
++bool decodeCacheEnabled() {
++    static const bool enabled = std::getenv("APS5_NO_DECODE_CACHE") == nullptr;
++    return enabled;
++}
++
++std::unordered_map<std::uint64_t, std::shared_ptr<const DrawDecode>>& decodeCache() {
++    static thread_local std::unordered_map<std::uint64_t, std::shared_ptr<const DrawDecode>> cache;
++    return cache;
++}
++
++// The cached decode with the programs' user words read again (the ones the decode key leaves out):
++// the cached object itself while they match, else a copy holding the current ones. The word count
++// is the stage's RSRC2 count (the register before the user words), as DecodeGraphicsPrograms reads
++// it; merged programs keep their leading words, a null pixel program has none.
++std::shared_ptr<const DrawDecode> withCurrentUserData(const std::shared_ptr<const DrawDecode>& cached, const QueueState& queue) {
++    std::shared_ptr<DrawDecode> copy;
++    for (std::size_t i = 0; i < cached->programs.size(); ++i) {
++        const auto& program = cached->programs[i];
++        const auto rsrc2 = queue.shader.find(program.userDataBase - 1u);
++        const auto resources = rsrc2 == queue.shader.end() ? 0u : rsrc2->second;
++        const auto count = std::min<std::size_t>(((resources >> 1u) & 0x1fu) | (((resources >> 27u) & 1u) << 5u), program.userData.size());
++        const auto prefix = program.userData.size() - count;
++        for (std::size_t word = 0; word < count; ++word) {
++            const auto value = readUserData(queue.shader, program.userDataBase + static_cast<std::uint32_t>(word));
++            const auto& current = copy != nullptr ? copy->programs[i].userData : program.userData;
++            if (current[prefix + word] == value) continue;
++            if (copy == nullptr) copy = std::make_shared<DrawDecode>(*cached);
++            copy->programs[i].userData[prefix + word] = value;
++        }
++    }
++    if (copy == nullptr) return cached;
++    return copy;
++}
++
++}
++
+ void Driver::resolveDrawDecode(const QueueState& queue, const Submission& submission, std::shared_ptr<const DrawDecode>& decode, bool registerKey, std::uint64_t drawKey, bool profile) {
++    const bool useDecodeCache = decode == nullptr && registerKey && decodeCacheEnabled() && !verifyDrawRecipe();
++    const auto decodeKey = queue.drawKeyRanges.decodeKey;
++    if (useDecodeCache) {
++        auto& cache = decodeCache();
++        if (const auto found = cache.find(decodeKey); found != cache.end()) {
++            if (DecodeProgramsCurrent(*found->second, *submission.shaders)) {
++                decode = withCurrentUserData(found->second, queue);
++                return;
++            }
++            cache.erase(found);
++        }
++    }
+     if (decode == nullptr || verifyDrawRecipe()) {
+         std::vector<Graphics::RegisterRead> readLog;
+         struct LogScope {
+@@ -155,6 +212,11 @@ void Driver::resolveDrawDecode(const QueueState& queue, const Submission& submis
+             drawEntryCounters.verifyDecodeMismatches += decodeMismatches;
+         }
+         decode = std::move(fresh);
++        if (useDecodeCache) {
++            auto& cache = decodeCache();
++            if (cache.size() >= 4096) cache.clear();
++            cache[decodeKey] = decode;
++        }
+     } else if (profile) {
+         std::lock_guard cacheLock(drawCacheMutex);
+         ++drawEntryCounters.decodeSkipped;
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawRegisterKey.cpp b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawRegisterKey.cpp
+index 8b7ae52..d7e4602 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawRegisterKey.cpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawRegisterKey.cpp
+@@ -77,25 +77,54 @@ std::uint64_t Driver::drawRegisterKey(const QueueState& queue, const ShaderRegis
+         key ^= value;
+         key *= Prime;
+     };
++    // The decode key: the same registers without the user words of any stage (the decoders read
++    // them only into the programs' user data, which a decode-cache hit reads again), so draws that
++    // differ only in per-draw user data (ring-buffer addresses) share one decode.
++    std::uint64_t decodeKey = 0x84222325cbf29ce4ull;
++    const auto decodeMix = [&](std::uint64_t value) {
++        decodeKey ^= value;
++        decodeKey *= Prime;
++    };
++    const auto userWord = [](std::uint32_t offset) { return (offset >= 0x00cu && offset < 0x02cu) || (offset >= 0x08cu && offset < 0x0acu) || (offset >= 0x10cu && offset < 0x12cu); };
++    decodeMix(deviceSerial);
++    for (std::size_t index = 0; index < Graphics::DrawKeyRegisters.size(); ++index) {
++        const auto& range = Graphics::DrawKeyRegisters[index];
++        if (range.bank != Graphics::RegisterBank::Shader) {
++            decodeMix(cache.hashes[index]);
++            continue;
++        }
++        std::uint64_t hash = (0xcbf29ce484222325ull ^ range.first) * Prime;
++        for (auto it = queue.shader.lower_bound(range.first); it != queue.shader.end() && it->first < range.first + range.count; ++it) {
++            if (userWord(it->first)) continue;
++            hash = (hash ^ it->first) * Prime;
++            hash = (hash ^ it->second) * Prime;
++        }
++        decodeMix(hash);
++    }
+     mix(deviceSerial);
+     for (std::size_t index = 0; index < Graphics::DrawKeyRegisters.size(); ++index) mix(cache.hashes[index]);
+     for (const auto base : {0x008u, 0x088u, 0x0c8u, 0x108u, 0x148u}) {
++        const auto both = [&](std::uint64_t value) {
++            mix(value);
++            decodeMix(value);
++        };
+         const auto low = queue.shader.find(base);
+         const auto high = queue.shader.find(base + 1);
+         if (low == queue.shader.end() || high == queue.shader.end()) {
+-            mix(0);
++            both(0);
+             continue;
+         }
+         const auto address = (static_cast<std::uint64_t>(low->second) << 8u) | (static_cast<std::uint64_t>(high->second & 0xffu) << 40u);
+         auto it = registry.upper_bound(address);
+         if (it == registry.begin()) {
+-            mix(1);
++            both(1);
+             continue;
+         }
+         --it;
+-        for (const auto& snapshot : it->second) mix(reinterpret_cast<std::uintptr_t>(snapshot.get()));
+-        mix(address - it->first);
++        for (const auto& snapshot : it->second) both(reinterpret_cast<std::uintptr_t>(snapshot.get()));
++        both(address - it->first);
+     }
++    cache.decodeKey = decodeKey;
+     return key;
+ }
+ 

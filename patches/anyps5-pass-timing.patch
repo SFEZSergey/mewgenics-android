@@ -1,0 +1,249 @@
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/include/Recorder.hpp b/core/libs/prx/libSceAgcDriver/Graphics/include/Recorder.hpp
+index 5342412e5..4016c404c 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/include/Recorder.hpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/include/Recorder.hpp
+@@ -66,7 +66,7 @@ public:
+         bool barrier = true;
+     };
+     DrawPassStart StartDrawPass(std::uint64_t key, bool forced, bool fenced, const PassAccess& access);
+-    void LeaveRenderPassOpen(std::uint64_t key, std::uint32_t timing, bool fenced, const PassAccess& access, std::function<void(VkCommandBuffer)> afterPass = {});
++    void LeaveRenderPassOpen(std::uint64_t key, std::uint32_t timing, bool fenced, const PassAccess& access, std::function<void(VkCommandBuffer)> afterPass = {}, std::uint32_t passTiming = NoTiming);
+     // DCC "uncompressed" key stores (DccMetadata.cpp StoreUncompressedOnGpu): queued on the open
+     // batch and recorded as one run (one barrier pair for every queued fill) at Submit, before a
+     // label store (RecordStore), or before a command that writes or reads a queued range (the
+@@ -448,6 +448,11 @@ public:
+     // union of every range of a batch and the batch span differ by what no class times ('untimed').
+     enum class CommandClass : std::uint8_t { DispatchLeading = 0, DispatchTrailing, IndirectArguments, LabelRun, Fill, FillClear, Copy, StagingIn, StagingOut, Draw, StorageUpload, StorageWriteBack, DccClear, DccKeyStore, PresentBlit, ShadowPublish, TemplateDataRefresh, Count };
+     static constexpr std::uint64_t ClassKey(CommandClass which) { return 0x10 + static_cast<std::uint64_t>(which); }
++    // A draw pass's [gputime] key (APS5_PROFILE_GPU): this bit, the render width << 44, height << 30,
++    // the color target count << 27 and the low 27 bits of the fragment program's variant.
++    static constexpr std::uint64_t PassTimingBit = 1ull << 63;
++    // One draw recorded into the pass of this key (the [gputime] draws per pass).
++    static void CountPassDraw(std::uint64_t key);
+     std::uint32_t BeginGpuTiming(CommandClass which) { return BeginGpuTiming(ClassKey(which)); }
+     static void CountBarriers(CommandClass which, std::uint32_t count = 1);
+     // A leading barrier a command left out because the previous trailing barrier covered its
+@@ -642,6 +647,8 @@ private:
+             bool fenced = false;
+             std::uint64_t key = 0;
+             std::uint32_t timing = NoTiming;
++            // The first draw's per-pass range (APS5_PROFILE_GPU; see PassTimingBit).
++            std::uint32_t passTiming = NoTiming;
+             std::function<void(VkCommandBuffer)> afterPass;
+         } renderPass;
+         PassHazards passHazards;
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp b/core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp
+index 825b51bf2..7be36f7c3 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp
+@@ -31,6 +31,7 @@
+ #include <memory>
+ #include <mutex>
+ #include <set>
++#include <span>
+ #include <unordered_map>
+ #include <utility>
+ 
+@@ -888,6 +889,62 @@ const char* DrawRecipeMissName(DrawRecipeMiss miss) {
+ 
+ namespace {
+ 
++// APS5_PROFILE_GPU: the [gputime] key of a draw's own range beside its class range: the render
++// extent, the color target count and the fragment program's variant, so the report splits the
++// draw time by pass (Recorder::readGpuTiming decodes it). Each new key is described once.
++std::uint64_t passTimingKey(const State& state, std::span<const CompiledShader> shaders) {
++    std::uint64_t fragment = 0;
++    const ShaderRecompiler::RecompileResult* program = nullptr;
++    for (const auto& shader : shaders) {
++        if (shader.stage == ShaderRecompiler::ShaderStage::Fragment && shader.program != nullptr) {
++            program = shader.program;
++            fragment = program->PipelineVariantId();
++        }
++    }
++    const auto clamp = [](std::uint64_t value, std::uint64_t limit) { return std::min(value, limit); };
++    const auto key = Recorder::PassTimingBit | clamp(state.renderExtent.width, 0x3fff) << 44 | clamp(state.renderExtent.height, 0x3fff) << 30 | clamp(state.colors.size(), 7) << 27 | (fragment & 0x7ffffff);
++    static std::mutex mutex;
++    static std::set<std::uint64_t> described;
++    std::lock_guard lock(mutex);
++    if (described.size() < 256 && described.insert(key).second) {
++        std::string formats;
++        for (const auto& color : state.colors) formats += " " + std::to_string(static_cast<int>(color.format)) + "@" + std::to_string(color.extent.width) + "x" + std::to_string(color.extent.height);
++        // The fragment program's weight: SPIR-V size, image instructions, loops, and its bindings.
++        std::string shape = "none";
++        if (program != nullptr) {
++            const auto& words = program->spirv.Words();
++            std::uint32_t samples = 0, fetches = 0, reads = 0, writes = 0, loops = 0, instructions = 0;
++            for (std::size_t at = 5; at < words.size();) {
++                const auto count = words[at] >> 16;
++                const auto opcode = words[at] & 0xffffu;
++                if (opcode >= 87 && opcode <= 94) ++samples;
++                else if (opcode == 95) ++fetches;
++                else if (opcode == 98) ++reads;
++                else if (opcode == 99) ++writes;
++                else if (opcode == 246) ++loops;
++                ++instructions;
++                at += count != 0 ? count : 1;
++            }
++            std::uint32_t kinds[7]{};
++            bool bda = false;
++            for (const auto& binding : program->bindings) {
++                kinds[static_cast<std::size_t>(binding.kind)] += binding.count;
++                bda = bda || binding.role == ShaderRecompiler::DescriptorRole::BdaPagetable;
++            }
++            // The program itself, beside the game (the working directory), for spirv-dis.
++            char path[64];
++            std::snprintf(path, sizeof(path), "pass-%llx.spv", static_cast<unsigned long long>(key));
++            if (auto* file = std::fopen(path, "wb")) {
++                std::fwrite(words.data(), sizeof(std::uint32_t), words.size(), file);
++                std::fclose(file);
++            }
++            shape = std::to_string(words.size()) + " words " + std::to_string(instructions) + " instructions, sample " + std::to_string(samples) + " fetch " + std::to_string(fetches) + " read " + std::to_string(reads) + " write " + std::to_string(writes) + " loops " + std::to_string(loops) + "; bindings ubo " + std::to_string(kinds[0]) + " ssbo " + std::to_string(kinds[1]) + " texel " + std::to_string(kinds[2] + kinds[3]) + " sampled " + std::to_string(kinds[4]) + " storage-image " + std::to_string(kinds[5]) + " sampler " + std::to_string(kinds[6]) + (bda ? " bda" : "") + ", runtime images " + std::to_string(program->runtimeImageCount);
++        }
++        std::fprintf(stderr, "[gputime] pass %llx: render %ux%u, colors%s, depth %s, blend %s, fragment variant %llx: %s\n", static_cast<unsigned long long>(key), state.renderExtent.width, state.renderExtent.height, formats.empty() ? " none" : formats.c_str(), state.depth ? (std::to_string(static_cast<int>(state.depth->format)) + "@" + std::to_string(state.depth->extent.width) + "x" + std::to_string(state.depth->extent.height)).c_str() : "none", !state.blends.empty() && state.blends.front().blendEnable ? "on" : "off", static_cast<unsigned long long>(fragment), shape.c_str());
++    }
++    return key;
++}
++
+ // APS5_PROFILE_DRAW: the per-phase timers of one draw (DrawPhase), shared by Draw's parts and
+ // DrawWithRecipe.
+ struct DrawTimer {
+@@ -1736,6 +1793,11 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
+     // The draw's [gputime] class range: from its first barrier to the pass's trailing barrier (a
+     // continued draw lies inside its pass's range).
+     const auto drawTiming = !continued ? recorder->BeginGpuTiming(CommandClass::Draw) : Recorder::NoTiming;
++    // The pass a continued draw joins is the last one begun on this thread (APS5_PROFILE_GPU).
++    thread_local std::uint64_t openPassKey = 0;
++    if (!continued && Recorder::GpuTimingEnabled()) openPassKey = passTimingKey(state, shaders);
++    const auto passTiming = !continued && Recorder::GpuTimingEnabled() ? recorder->BeginGpuTiming(openPassKey) : Recorder::NoTiming;
++    if (Recorder::GpuTimingEnabled()) Recorder::CountPassDraw(openPassKey);
+     if (!continued && Recorder::BarrierValidate()) {
+         auto reads = resources.InPlaceReads();
+         reads.insert(reads.end(), inputs.inPlaceReads.begin(), inputs.inPlaceReads.end());
+@@ -1809,7 +1871,7 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
+             }
+         };
+     }
+-    recorder->LeaveRenderPassOpen(passKey, drawTiming, fenced, passAccess, std::move(storeProxies));
++    recorder->LeaveRenderPassOpen(passKey, drawTiming, fenced, passAccess, std::move(storeProxies), passTiming);
+     timer.phase(PhaseRecord);
+     keepRecordedDraw(*recorder, record.resources, std::move(record.pipeline), std::move(record.framebuffer), inputs, std::move(record.targets), std::move(scratch), std::move(checkRecords), record.listed, record.completion, outcome);
+     timer.phase(PhaseKeep);
+@@ -2222,6 +2284,9 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
+     APS5_LOG_CHARS_OUT_DEBUG("CommandBatch created");
+     // The draw's [gputime] class range: from its first barrier to the download barrier.
+     const auto drawTiming = recorded ? recorder->BeginGpuTiming(CommandClass::Draw) : Recorder::NoTiming;
++    const auto passTimingKeyOwn = recorded && Recorder::GpuTimingEnabled() ? passTimingKey(state, shaders) : 0;
++    const auto passTiming = passTimingKeyOwn != 0 ? recorder->BeginGpuTiming(passTimingKeyOwn) : Recorder::NoTiming;
++    if (passTimingKeyOwn != 0) Recorder::CountPassDraw(passTimingKeyOwn);
+     if (recorded && Recorder::BarrierValidate()) {
+         auto reads = resources->InPlaceReads();
+         reads.insert(reads.end(), inputs.inPlaceReads.begin(), inputs.inPlaceReads.end());
+@@ -2352,7 +2417,10 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
+     download.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+     context.Resolved(&DeviceFunctions::cmdPipelineBarrier, "vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_TRANSFER_BIT | inputs.shaderStages, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &download, 0, nullptr, 0, nullptr);
+     countBarrier();
+-    if (recorded) recorder->EndGpuTiming(drawTiming);
++    if (recorded) {
++        recorder->EndGpuTiming(passTiming);
++        recorder->EndGpuTiming(drawTiming);
++    }
+     APS5_LOG_CHARS_OUT_DEBUG("Download barrier recorded");
+     APS5_LOG_CHARS_OUT_DEBUG("SubmitAndWait");
+     timer.phase(PhaseRecord);
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp b/core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp
+index 2b5536d0e..f1d02e9f6 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp
+@@ -1392,11 +1392,12 @@ Recorder::DrawPassStart Recorder::StartDrawPass(std::uint64_t key, bool forced,
+     return {commands, false, !elide};
+ }
+ 
+-void Recorder::LeaveRenderPassOpen(std::uint64_t key, std::uint32_t timing, bool fenced, const PassAccess& access, std::function<void(VkCommandBuffer)> afterPass) {
++void Recorder::LeaveRenderPassOpen(std::uint64_t key, std::uint32_t timing, bool fenced, const PassAccess& access, std::function<void(VkCommandBuffer)> afterPass, std::uint32_t passTiming) {
+     Require(open != nullptr, "no batch is open for the render pass");
+     auto& pass = open->renderPass;
+     if (!pass.open) {
+         pass.timing = timing;
++        pass.passTiming = passTiming;
+         pass.afterPass = std::move(afterPass);
+     }
+     pass.open = true;
+@@ -1416,6 +1417,7 @@ void Recorder::endOpenRenderPass(bool barrier) {
+         CountBarriers(CommandClass::Draw);
+     }
+     if (pass.afterPass) pass.afterPass(open->commands);
++    EndGpuTiming(pass.passTiming);
+     EndGpuTiming(pass.timing);
+     open->coveredAccess = barrier ? VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT : 0;
+     open->hostReadOwed = true;
+@@ -1747,6 +1749,7 @@ std::atomic<std::uint64_t> timingDropped{0};
+ struct TimingTotals { std::uint64_t count = 0; double ms = 0; std::uint64_t bytes = 0; };
+ std::mutex timingMutex;
+ std::map<std::uint64_t, TimingTotals> timingByKey;
++std::map<std::uint64_t, std::uint64_t> passDraws;
+ double timingProgramMs = 0, timingClassMs = 0, timingUnionMs = 0, timingBatchMs = 0;
+ std::uint64_t timingBatches = 0;
+ 
+@@ -1802,8 +1805,18 @@ void reportBarriers() {
+ 
+ }
+ 
++void Recorder::CountPassDraw(std::uint64_t key) {
++    if (key == 0) return;
++    std::lock_guard lock(timingMutex);
++    ++passDraws[key];
++}
++
+ bool Recorder::GpuTimingEnabled() {
+-    static const bool enabled = std::getenv("APS5_PROFILE_GPU") != nullptr;
++    // Set and not "0" (APS5_PROFILE_GPU=0 reads as off, as a launcher env file writes it).
++    static const bool enabled = [] {
++        const char* value = std::getenv("APS5_PROFILE_GPU");
++        return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
++    }();
+     return enabled;
+ }
+ 
+@@ -2378,7 +2391,7 @@ void Recorder::readGpuTiming(Batch& batch) {
+         ++totals.count;
+         totals.ms += ns / 1e6;
+         totals.bytes += batch.timedBytes[i];
+-        (key >= ClassKey(CommandClass::DispatchLeading) && key < ClassKey(CommandClass::Count) ? timingClassMs : timingProgramMs) += ns / 1e6;
++        if ((key & PassTimingBit) == 0) (key >= ClassKey(CommandClass::DispatchLeading) && key < ClassKey(CommandClass::Count) ? timingClassMs : timingProgramMs) += ns / 1e6;
+         intervals.emplace_back(stamps[i * 2], stamps[i * 2 + 1]);
+     }
+     std::sort(intervals.begin(), intervals.end());
+@@ -2395,10 +2408,12 @@ void Recorder::readGpuTiming(Batch& batch) {
+     lastReport = now;
+     const auto presents = timingPresents.exchange(0, std::memory_order_relaxed);
+     const double perPresent = presents != 0 ? 1.0 / static_cast<double>(presents) : 0.0;
+-    std::vector<std::pair<std::uint64_t, TimingTotals>> hot;
++    std::vector<std::pair<std::uint64_t, TimingTotals>> hot, passes;
+     std::string classes;
+     for (const auto& [key, totals] : timingByKey) {
+-        if (key >= ClassKey(CommandClass::DispatchLeading) && key < ClassKey(CommandClass::Count)) {
++        if ((key & PassTimingBit) != 0) {
++            passes.emplace_back(key, totals);
++        } else if (key >= ClassKey(CommandClass::DispatchLeading) && key < ClassKey(CommandClass::Count)) {
+             char text[160];
+             std::snprintf(text, sizeof(text), " %s x%llu %.1fms %.1fMiB (per present x%.1f %.2fms %.2fMiB)", CommandClassNames[key - ClassKey(CommandClass::DispatchLeading)], static_cast<unsigned long long>(totals.count), totals.ms, totals.bytes / 1048576.0, static_cast<double>(totals.count) * perPresent, totals.ms * perPresent, totals.bytes / 1048576.0 * perPresent);
+             classes += text;
+@@ -2411,7 +2426,18 @@ void Recorder::readGpuTiming(Batch& batch) {
+     AgcDriver::ProfilePrint_nid_no_patch("[gputime] %.0f ms of GPU time in %llu batches over 10 s (batch %.0f ms first to last command; classes %.0f ms, all ranges %.0f ms, untimed %.0f ms outside every range; %llu presents; %llu ranges dropped at the %u cap); by program:", timingProgramMs, static_cast<unsigned long long>(timingBatches), timingBatchMs, timingClassMs, timingUnionMs, timingBatchMs - timingUnionMs, static_cast<unsigned long long>(presents), static_cast<unsigned long long>(timingDropped.exchange(0, std::memory_order_relaxed)), MaxTimedRanges);
+     for (std::size_t i = 0; i < hot.size() && i < 12; ++i) AgcDriver::ProfilePrint_nid_no_patch(" 0x%llx x%llu %.0fms", static_cast<unsigned long long>(hot[i].first), static_cast<unsigned long long>(hot[i].second.count), hot[i].second.ms);
+     AgcDriver::ProfilePrint_nid_no_patch("; by class:%s\n", classes.c_str());
++    // The draw time by pass (the key's fields; the pass's description is printed when first seen).
++    std::sort(passes.begin(), passes.end(), [](const auto& a, const auto& b) { return a.second.ms > b.second.ms; });
++    if (!passes.empty()) {
++        AgcDriver::ProfilePrint_nid_no_patch("[gputime] draw passes (per present):");
++        for (std::size_t i = 0; i < passes.size() && i < 16; ++i) {
++            const auto key = passes[i].first;
++            AgcDriver::ProfilePrint_nid_no_patch(" %llx %ux%u c%u x%.1f %.2fms %.0f draws;", static_cast<unsigned long long>(key), static_cast<unsigned>(key >> 44 & 0x3fff), static_cast<unsigned>(key >> 30 & 0x3fff), static_cast<unsigned>(key >> 27 & 7), static_cast<double>(passes[i].second.count) * perPresent, passes[i].second.ms * perPresent, static_cast<double>(passDraws[key]) * perPresent);
++        }
++        AgcDriver::ProfilePrint_nid_no_patch("\n");
++    }
+     timingByKey.clear();
++    passDraws.clear();
+     timingProgramMs = timingClassMs = timingUnionMs = timingBatchMs = 0;
+     timingBatches = 0;
+     lock.unlock();

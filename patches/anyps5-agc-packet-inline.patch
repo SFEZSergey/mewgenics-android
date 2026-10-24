@@ -1,0 +1,97 @@
+diff --git a/core/libs/prx/libSceAgc/Command/include/Packet.hpp b/core/libs/prx/libSceAgc/Command/include/Packet.hpp
+index 7b92007d8..4df855b84 100644
+--- a/core/libs/prx/libSceAgc/Command/include/Packet.hpp
++++ b/core/libs/prx/libSceAgc/Command/include/Packet.hpp
+@@ -7,7 +7,12 @@
+ 
+ namespace Agc::Command {
+ 
+-void Require(bool condition, const char* function, const char* reason);
++// Throws "function: reason". Require is inline (a check per packet field: under box64 an out-of-line
++// call per check cost more than the packet itself); only the failure leaves the caller.
++[[noreturn]] void Fail(const char* function, const char* reason);
++inline void Require(bool condition, const char* function, const char* reason) {
++    if (!condition) [[unlikely]] Fail(function, reason);
++}
+ void CheckBits(std::uint64_t value, std::uint64_t mask, const char* function);
+ void CheckAddress(std::uint64_t address, std::uint32_t alignment, const char* function);
+ std::uint32_t Header(std::uint32_t opcode, std::uint32_t count, std::uint32_t flags = 0);
+diff --git a/core/libs/prx/libSceAgc/Command/src/Packet.cpp b/core/libs/prx/libSceAgc/Command/src/Packet.cpp
+index 4bf5a844f..70dde31a2 100644
+--- a/core/libs/prx/libSceAgc/Command/src/Packet.cpp
++++ b/core/libs/prx/libSceAgc/Command/src/Packet.cpp
+@@ -9,10 +9,41 @@
+ 
+ namespace Agc::Command {
+ 
+-void Require(bool condition, const char* function, const char* reason) {
+-    if (!condition) {
+-        throw std::runtime_error(std::string(function) + ": " + reason);
++void Fail(const char* function, const char* reason) {
++    throw std::runtime_error(std::string(function) + ": " + reason);
++}
++
++namespace {
++
++// Up to N elements on the stack, more on the heap: register lists are short, and every vector here
++// was a guest malloc/free pair through the box64 bridge per packet.
++template<typename T, std::size_t N>
++class SmallBuffer {
++public:
++    void push_back(const T& value) {
++        if (size_ < N) { inline_[size_++] = value; return; }
++        if (heap_.empty()) heap_.assign(inline_, inline_ + size_);
++        heap_.push_back(value);
++        ++size_;
+     }
++    void assign(const T* first, const T* last) {
++        clear();
++        for (; first != last; ++first) push_back(*first);
++    }
++    void clear() { size_ = 0; heap_.clear(); }
++    std::size_t size() const { return size_; }
++    const T* data() const { return heap_.empty() ? inline_ : heap_.data(); }
++    const T& operator[](std::size_t index) const { return data()[index]; }
++    const T& back() const { return data()[size_ - 1]; }
++    const T* begin() const { return data(); }
++    const T* end() const { return data() + size_; }
++
++private:
++    T inline_[N];
++    std::vector<T> heap_;
++    std::size_t size_ = 0;
++};
++
+ }
+ 
+ void CheckBits(std::uint64_t value, std::uint64_t mask, const char* function) {
+@@ -94,7 +125,7 @@ std::uint32_t* WriteNop(CommandBuffer* buffer, std::uint32_t count, const char*
+ 
+ std::uint32_t* WriteRegisterRange(CommandBuffer* buffer, std::uint32_t opcode, std::uint32_t offset, const std::uint32_t* values, std::uint32_t count, const char* function) {
+     Require(count != 0 && count <= 0x3fffu && offset <= 0xffffu && count <= 0x10000u - offset, function, "invalid register range");
+-    std::vector<std::uint32_t> snapshot;
++    SmallBuffer<std::uint32_t, 128> snapshot;
+     if (values != nullptr) {
+         CheckAddress(reinterpret_cast<std::uintptr_t>(values), 4, function);
+         snapshot.assign(values, values + count);
+@@ -109,9 +140,8 @@ std::uint32_t* WriteRegisterRange(CommandBuffer* buffer, std::uint32_t opcode, s
+ std::uint32_t* WriteRegisters(CommandBuffer* buffer, std::uint32_t opcode, const volatile ShaderRegister* registers, std::uint32_t count, bool snapshotAll, const char* function) {
+     Require(count != 0, function, "empty register list");
+     CheckAddress(reinterpret_cast<std::uintptr_t>(registers), 4, function);
+-    std::vector<ShaderRegister> snapshot;
++    SmallBuffer<ShaderRegister, 128> snapshot;
+     if (snapshotAll) {
+-        snapshot.reserve(count);
+         for (std::uint32_t i = 0; i < count; ++i) {
+             snapshot.push_back({registers[i].offset, registers[i].value});
+             CheckBits(snapshot.back().offset, 0xffffu, function);
+@@ -124,7 +154,8 @@ std::uint32_t* WriteRegisters(CommandBuffer* buffer, std::uint32_t opcode, const
+     while (index < count) {
+         const auto offset = offsetAt(index);
+         CheckBits(offset, 0xffffu, function);
+-        std::vector<std::uint32_t> values{valueAt(index++)};
++        SmallBuffer<std::uint32_t, 128> values;
++        values.push_back(valueAt(index++));
+         while (index < count && offsetAt(index) == offset + values.size() && values.size() < 0x3fffu) {
+             CheckBits(offsetAt(index), 0xffffu, function);
+             values.push_back(valueAt(index++));

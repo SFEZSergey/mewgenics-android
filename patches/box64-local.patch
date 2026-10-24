@@ -1,0 +1,907 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index fbe52c5..c1f25ee 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1762,3 +1762,7 @@ endif()
+ if(NOT NOBOX64)
+     add_subdirectory(tests)
+ endif()
++
++# AnyPS5: the native replacements of hot game functions (FAudio mixing, game libc) are pure leaf
++# code that runs instead of the title's own; -O3 vectorizes their loops (no fast-math: same results).
++set_source_files_properties("${BOX64_ROOT}/src/tools/aps5hot.c" PROPERTIES COMPILE_OPTIONS "-O3")
+diff --git a/src/custommem.c b/src/custommem.c
+index d22aee2..c23cf96 100644
+--- a/src/custommem.c
++++ b/src/custommem.c
+@@ -1666,6 +1666,7 @@ void DelMmaplist(mmaplist_t* list)
+     box_free(list);
+ }
+ 
++
+ dynablock_t* FindDynablockFromNativeAddress(void* p)
+ {
+     if(!p)
+@@ -2942,6 +2943,27 @@ uint32_t getProtection(uintptr_t addr)
+     return ret;
+ }
+ 
++#ifdef ANDROID
++// AnyPS5 write watch (aps5native): host protections of `pages` pages of `page` bytes from box64's own
++// map, instead of a parse of /proc/self/maps (huge under box64) per newly watched range. out[i] is
++// PROT_READ|PROT_WRITE|PROT_EXEC, or 0 when box64 does not know the page or guards it for the dynarec
++// (its host protection then differs from the recorded one): the caller reads those from maps.
++EXPORT void box64_aps5_page_protections(uintptr_t begin, size_t pages, size_t page, uint8_t* out)
++{
++    const uintptr_t end = begin + pages * page;
++    LOCK_PROT_READ();
++    for (uintptr_t addr = begin; addr < end;) {
++        uint32_t prot = 0;
++        uintptr_t bend = 0;
++        const int found = rb_get_end(memprot, addr, &prot, &bend);
++        if (bend <= addr || bend > end) bend = end;
++        const uint8_t value = (found && !(prot & PROT_CUSTOM)) ? (uint8_t)(prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) : 0;
++        for (; addr < bend; addr += page) out[(addr - begin) / page] = value;
++    }
++    UNLOCK_PROT_READ();
++}
++#endif
++
+ uint32_t getProtection_fast(uintptr_t addr)
+ {
+     LOCK_PROT_FAST();
+@@ -3514,6 +3536,20 @@ EXPORT void* box64_native_to_x64(void* p)
+     dynablock_t* db = FindDynablockFromNativeAddress(p);
+     return db ? db->x64_addr : NULL;
+ }
++
++// The x86 instruction the native address belongs to (not the block start): the host sampler groups
++// samples by guest function, and one block can span a whole function. NULL outside translated code.
++uintptr_t getX64Address(dynablock_t* db, uintptr_t native_addr);
++EXPORT void* box64_native_to_x64_exact(void* p)
++{
++    if(!rbt_dynmem)
++        return NULL;
++    dynablock_t* db = FindDynablockFromNativeAddress(p);
++    if(!db || !db->done || db->gone)
++        return NULL;
++    uintptr_t x64 = getX64Address(db, (uintptr_t)p);
++    return (void*)(x64 ? x64 : (uintptr_t)db->x64_addr);
++}
+ #endif
+ 
+ // For the AnyPS5 write watch (native SIGSEGV handler in front of box64's): does box64 keep this
+diff --git a/src/dynarec/arm64/dynarec_arm64_avx_66_0f38.c b/src/dynarec/arm64/dynarec_arm64_avx_66_0f38.c
+index c5b3d94..f26bf56 100644
+--- a/src/dynarec/arm64/dynarec_arm64_avx_66_0f38.c
++++ b/src/dynarec/arm64/dynarec_arm64_avx_66_0f38.c
+@@ -1859,6 +1859,23 @@ uintptr_t dynarec64_AVX_66_0F38(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip
+             }
+             YMM0(gd);
+             break;
++        case 0xBF:
++            INST_NAME("VFNMSUB231SS/D Gx, Vx, Ex");
++            nextop = F8;
++            GETGX(v0, 1);
++            GETVX(v2, 0);
++            if(rex.w) {GETEXSD(v1, 0, 0);} else {GETEXSS(v1, 0, 0);}
++            q0 = fpu_get_scratch(dyn, ninst);
++            // -(Vx*Ex) - Gx: AArch64 FNMADD (Sd = -Sa - Sn*Sm)
++            if(rex.w) {
++                FNMADD_64(q0, v0, v1, v2);
++                VMOVeD(v0, 0, q0, 0);
++            } else {
++                FNMADD_32(q0, v0, v1, v2);
++                VMOVeS(v0, 0, q0, 0);
++            }
++            YMM0(gd);
++            break;
+         case 0xBE:
+             INST_NAME("VFNMSUB231PS/D Gx, Vx, Ex");
+             nextop = F8;
+diff --git a/src/dynarec/arm64/dynarec_arm64_avx_66_0f3a.c b/src/dynarec/arm64/dynarec_arm64_avx_66_0f3a.c
+index e445260..80db5a3 100644
+--- a/src/dynarec/arm64/dynarec_arm64_avx_66_0f3a.c
++++ b/src/dynarec/arm64/dynarec_arm64_avx_66_0f3a.c
+@@ -798,6 +798,44 @@ uintptr_t dynarec64_AVX_66_0F3A(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip
+             if(!vex.l) YMM0(gd);
+             break;
+ 
++        case 0x63:
++            // Same as the legacy PCMPISTRI (dynarec_arm64_660f.c): no vector destination, only ECX
++            // and the flags, so the VEX form needs no upper-lane handling.
++            INST_NAME("VPCMPISTRI Gx, Ex, Ib");
++            SETFLAGS(X_ALL, SF_SET_DF);
++            nextop = F8;
++            GETG;
++            if(gd>7)
++                sse_reflect_reg(dyn, ninst, gd);
++            ADDx_U12(x2, xEmu, offsetof(x64emu_t, xmm[gd]));
++            if(MODREG) {
++                ed = (nextop&7)+(rex.b<<3);
++                if(ed>7)
++                    sse_reflect_reg(dyn, ninst, ed);
++                ADDx_U12(x1, xEmu, offsetof(x64emu_t, xmm[ed]));
++            } else {
++                addr = geted(dyn, addr, ninst, nextop, &ed, x1, &fixedaddress, NULL, 0, 0, rex, NULL, 0, 1);
++                if(ed!=x1) {
++                    MOVx_REG(x1, ed);
++                }
++            }
++            u8 = F8;
++            MOV32w(x3, u8);
++            CALL(const_sse42_compare_string_implicit_len, x1);
++            CBNZw_MARK(x1);
++            MOV32w(xRCX, (u8&1)?8:16);
++            B_NEXT_nocond;
++            MARK;
++            if(u8&0b1000000) {
++                CLZw(xRCX, x1);
++                MOV32w(x2, 31);
++                SUBw_REG(xRCX, x2, xRCX);
++            } else {
++                RBITw(xRCX, x1);
++                CLZw(xRCX, xRCX);
++            }
++            break;
++
+        case 0xDF:
+             INST_NAME("VAESKEYGENASSIST Gx, Ex, Ib");
+             nextop = F8;
+diff --git a/src/dynarec/arm64/dynarec_arm64_helper.c b/src/dynarec/arm64/dynarec_arm64_helper.c
+index d0038c0..b70b6a1 100644
+--- a/src/dynarec/arm64/dynarec_arm64_helper.c
++++ b/src/dynarec/arm64/dynarec_arm64_helper.c
+@@ -1433,15 +1433,23 @@ int sse_setround(dynarec_arm_t* dyn, int ninst, int s1, int s2, int s3)
+     MRS_fpcr(s1);               // get fpscr
+     MOVx_REG(s3, s1);
+     BFIx(s1, s2, 22, 2);     // inject new round
++    // FPCR writes are serializing and the rounding mode almost never differs (round to nearest):
++    // write only on a change, else return a restore value with bit 63 set (RES0 in FPCR) so that
++    // x87_restoreround skips its write too. No compare: NZCV may hold the guest flags.
++    EORx_REG(s2, s1, s3);
++    CBNZx(s2, 3*4);
++    MOVNx(s3, 0);
++    B(2*4);
+     MSR_fpcr(s1);               // put new fpscr
+     return s3;
+ }
+ 
+-// Restore round flag
++// Restore round flag (a value with bit 63 set comes from a sse_setround that changed nothing)
+ void x87_restoreround(dynarec_arm_t* dyn, int ninst, int s1)
+ {
+     MAYUSE(dyn); MAYUSE(ninst);
+     MAYUSE(s1);
++    TBNZ(s1, 63, 2*4);
+     MSR_fpcr(s1);               // put back fpscr
+ }
+ 
+diff --git a/src/dynarec/dynablock.c b/src/dynarec/dynablock.c
+index d81e7f3..e910217 100644
+--- a/src/dynarec/dynablock.c
++++ b/src/dynarec/dynablock.c
+@@ -15,6 +15,9 @@
+ #include "emu/x64run_private.h"
+ #include "x64trace.h"
+ #include "dynablock.h"
++#ifdef ANDROID
++void box64_sigmask_count(int site);
++#endif
+ #include "dynablock_private.h"
+ #include "dynarec_private.h"
+ #include "alternate.h"
+@@ -347,6 +350,9 @@ dynablock_t* CreateDBnoAlt(x64emu_t* emu, uintptr_t addr, int is32bits)
+     }
+     #endif
+ 
++    #ifdef ANDROID
++    box64_sigmask_count(8);
++    #endif
+     pthread_sigmask(SIG_BLOCK, &critical_prot, &old_sig);
+ 
+     if(BOX64ENV(dynarec_wait)) {
+@@ -406,6 +412,9 @@ dynablock_t* internalDBGetBlock(x64emu_t* emu, uintptr_t addr, int create, int n
+     }
+     #endif
+ 
++    #ifdef ANDROID
++    box64_sigmask_count(9);
++    #endif
+     pthread_sigmask(SIG_BLOCK, &critical_prot, &old_sig);
+     if(need_lock) {
+         if(BOX64ENV(dynarec_wait)) {
+diff --git a/src/emu/x64runavx.c b/src/emu/x64runavx.c
+index 36ac703..c2a9416 100644
+--- a/src/emu/x64runavx.c
++++ b/src/emu/x64runavx.c
+@@ -9,6 +9,7 @@
+ #include <signal.h>
+ #include <sys/types.h>
+ #include <unistd.h>
++#include <time.h>
+ 
+ #include "debug.h"
+ #include "box64stack.h"
+@@ -53,6 +54,43 @@ static const char* avx_map_string(uint16_t m)
+ #ifdef TEST_INTERPRETER
+ uintptr_t TestAVX(x64test_t *test, vex_t vex, uintptr_t addr, int *step)
+ #else
++#ifndef TEST_INTERPRETER
++#ifdef ANDROID
++// APS5: which VEX opcodes the interpreter runs (the dynarec falls back to it for the ones it does
++// not translate): every 10 s the most frequent are printed as "[avx-interp]" lines (map, prefix,
++// opcode, width). Relaxed counters, one per (map, prefix, opcode, L); no instruction names.
++static uint32_t aps5_avx_counts[4][4][256][2];
++static uint64_t aps5_avx_reported = 0;
++static void aps5_avx_count(vex_t vex, uint8_t opcode)
++{
++    if(vex.m > 3 || vex.p > 3) return;
++    __atomic_fetch_add(&aps5_avx_counts[vex.m][vex.p][opcode][vex.l & 1], 1, __ATOMIC_RELAXED);
++    struct timespec now;
++    clock_gettime(CLOCK_MONOTONIC, &now);
++    uint64_t sec = (uint64_t)now.tv_sec;
++    uint64_t last = __atomic_load_n(&aps5_avx_reported, __ATOMIC_RELAXED);
++    if(!last) { __atomic_compare_exchange_n(&aps5_avx_reported, &last, sec, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED); return; }
++    if(sec - last < 10 || !__atomic_compare_exchange_n(&aps5_avx_reported, &last, sec, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) return;
++    char line[1024]; int used = snprintf(line, sizeof(line), "[avx-interp] 10 s:");
++    for(int k = 0; k < 16; ++k) {
++        uint32_t best = 0; int bm = 0, bp = 0, bo = 0, bl = 0;
++        for(int m = 0; m < 4; ++m) for(int p = 0; p < 4; ++p) for(int o = 0; o < 256; ++o) for(int l = 0; l < 2; ++l) {
++            uint32_t c = __atomic_load_n(&aps5_avx_counts[m][p][o][l], __ATOMIC_RELAXED);
++            if(c > best) { best = c; bm = m; bp = p; bo = o; bl = l; }
++        }
++        if(!best) break;
++        __atomic_store_n(&aps5_avx_counts[bm][bp][bo][bl], 0, __ATOMIC_RELAXED);
++        static const char* maps[4] = {"?", "0F", "0F38", "0F3A"};
++        static const char* prefixes[4] = {"--", "66", "F3", "F2"};
++        used += snprintf(line + used, sizeof(line) - used, " %s.%s.%02X.%d=%u", prefixes[bp], maps[bm], bo, 128 << bl, best);
++        if(used >= (int)sizeof(line) - 40) break;
++    }
++    for(int m = 0; m < 4; ++m) for(int p = 0; p < 4; ++p) for(int o = 0; o < 256; ++o) for(int l = 0; l < 2; ++l) __atomic_store_n(&aps5_avx_counts[m][p][o][l], 0, __ATOMIC_RELAXED);
++    fprintf(stderr, "%s\n", line);
++}
++#endif
++#endif
++
+ uintptr_t RunAVX(x64emu_t *emu, vex_t vex, uintptr_t addr, int *step)
+ #endif
+ {
+@@ -82,6 +120,9 @@ uintptr_t RunAVX(x64emu_t *emu, vex_t vex, uintptr_t addr, int *step)
+     else addr = 0;
+ #else
+     uint8_t opcode = PK(0);
++#ifdef ANDROID
++    aps5_avx_count(vex, opcode);
++#endif
+     if( (vex.m==VEX_M_0F) && (vex.p==VEX_P_NONE))
+         addr = RunAVX_0F(emu, vex, addr, step);
+     else  if( (vex.m==VEX_M_0F38) && (vex.p==VEX_P_NONE))
+diff --git a/src/libtools/auxval.c b/src/libtools/auxval.c
+index 8169416..5d7c70c 100644
+--- a/src/libtools/auxval.c
++++ b/src/libtools/auxval.c
+@@ -20,6 +20,9 @@
+ #include "emu/x64emu_private.h"
+ #include "box64stack.h"
+ #include "auxval.h"
++#ifdef ANDROID
++#include <sys/auxv.h>
++#endif
+ 
+ static uintptr_t* auxval_start = NULL;
+ 
+@@ -46,6 +49,14 @@ __attribute__((section(".init_array"))) static void *init_auxval_constructor = &
+ 
+ unsigned long real_getauxval(unsigned long type)
+ {
++#ifdef ANDROID
++    // In an app process (libbox64.so loaded into a zygote child) the words after the startup environment are not
++    // reliably the auxv: AT_HWCAP came back without any extension bit and the dynarec ran with ASIMD only (no LSE
++    // atomics, FLAGM, FRINT...). Bionic keeps the process auxv itself.
++    unsigned long value = getauxval(type);
++    if(value)
++        return value;
++#endif
+     if(!auxval_start)
+         return 0;
+     uintptr_t* p = auxval_start;
+diff --git a/src/libtools/signals.c b/src/libtools/signals.c
+index 35895a1..d4ccb04 100644
+--- a/src/libtools/signals.c
++++ b/src/libtools/signals.c
+@@ -209,6 +209,35 @@ uint64_t RunFunctionHandler(x64emu_t* emu, int* exit, int dynarec, x64_ucontext_
+     return ret;
+ }
+ 
++#ifdef ANDROID
++// AnyPS5: signal-mask syscalls by call site ("[sigmask]" line every 10 s in the log), to find the one
++// that keeps the game thread in rt_sigprocmask.
++static const char* const sigmask_site_names[] = {"guest-sigprocmask", "guest-pthread_sigmask", "sigsetjmp-save", "longjmp-restore", "getcontext", "setcontext", "swapcontext", "sigaltstack", "dynablock-alt", "dynablock-get", "signal-return"};
++#define SIGMASK_SITES (int)(sizeof(sigmask_site_names) / sizeof(sigmask_site_names[0]))
++static uint64_t sigmask_counts[SIGMASK_SITES];
++static uint64_t sigmask_report_at;
++void box64_sigmask_count(int site)
++{
++    if(site < 0 || site >= SIGMASK_SITES) return;
++    __atomic_fetch_add(&sigmask_counts[site], 1, __ATOMIC_RELAXED);
++    struct timespec now;
++    clock_gettime(CLOCK_MONOTONIC_COARSE, &now);
++    const uint64_t seconds = (uint64_t)now.tv_sec;
++    uint64_t due = __atomic_load_n(&sigmask_report_at, __ATOMIC_RELAXED);
++    if(due == 0) { __atomic_compare_exchange_n(&sigmask_report_at, &due, seconds + 10, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED); return; }
++    if(seconds < due || !__atomic_compare_exchange_n(&sigmask_report_at, &due, seconds + 10, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) return;
++    char line[512]; int used = snprintf(line, sizeof(line), "[sigmask] 10 s:");
++    for(int i = 0; i < SIGMASK_SITES && used < (int)sizeof(line); ++i) {
++        const uint64_t count = __atomic_exchange_n(&sigmask_counts[i], 0, __ATOMIC_RELAXED);
++        if(count) used += snprintf(line + used, sizeof(line) - used, " %s %llu", sigmask_site_names[i], (unsigned long long)count);
++    }
++    printf_log(LOG_NONE, "%s\n", line);
++}
++#define SIGMASK_COUNT(site) box64_sigmask_count(site)
++#else
++#define SIGMASK_COUNT(site) do {} while(0)
++#endif
++
+ EXPORT int my_sigaltstack(x64emu_t* emu, const x64_stack_t* ss, x64_stack_t* oss)
+ {
+     if(!ss && !oss) {   // this is not true, ss can be NULL to retreive oss info only
+@@ -216,6 +245,7 @@ EXPORT int my_sigaltstack(x64emu_t* emu, const x64_stack_t* ss, x64_stack_t* oss
+         return -1;
+     }
+     signal_jmpbuf_active = 1;
++    SIGMASK_COUNT(7);
+     if(sigsetjmp(SIG_JMPBUF, 1)) {
+         // segfault while gathering function name...
+         errno = EFAULT;
+@@ -661,6 +691,7 @@ int my_sigactionhandler_oldcode_64(x64emu_t* emu, int32_t sig, int simple, sigin
+             // EmuRun's sigsetjmp does not save the mask (see dynarec.c): restore the thread's mask from
+             // before this signal, as a mask-saving siglongjmp would have.
+             if(ucntx) {
++                SIGMASK_COUNT(10);
+                 pthread_sigmask(SIG_SETMASK, &((ucontext_t*)ucntx)->uc_sigmask, NULL);
+             } else {
+                 sigset_t unblock;
+@@ -1706,6 +1737,7 @@ EXPORT int my_getcontext(x64emu_t* emu, void* ucp)
+     *(uint32_t*)(ucp + 432) = emu->mxcsr.x32;
+ 
+     // get signal mask
++    SIGMASK_COUNT(4);
+     sigprocmask(SIG_SETMASK, NULL, (sigset_t*)&u->uc_sigmask);
+ 
+     return 0;
+@@ -1745,6 +1777,7 @@ EXPORT int my_setcontext(x64emu_t* emu, void* ucp)
+     fpu_loadenv(emu, (void*)u->uc_mcontext.fpregs, 1);
+     emu->mxcsr.x32 = *(uint32_t*)(ucp + 432);
+     // set signal mask
++    SIGMASK_COUNT(5);
+     sigprocmask(SIG_SETMASK, (sigset_t*)&u->uc_sigmask, NULL);
+     errno = 0;
+ 
+diff --git a/src/tools/aps5hot.c b/src/tools/aps5hot.c
+index 57fb4cc..e1f7d0e 100644
+--- a/src/tools/aps5hot.c
++++ b/src/tools/aps5hot.c
+@@ -9,6 +9,10 @@
+ #include <stdint.h>
+ #include <string.h>
+ #include <sys/mman.h>
++#include <dlfcn.h>
++#include <stdbool.h>
++#include <stdio.h>
++#include <stdlib.h>
+ 
+ #include "debug.h"
+ #include "box64context.h"
+@@ -18,6 +22,10 @@
+ #include "custommem.h"
+ #include "env.h"
+ #include "aps5hot_sincos.h"
++#include "aps5hot_faudio.h"
++#include "emu/x64emu_private.h"
++#include "regs.h"
++#include "callback.h"
+ 
+ static void Aps5SinCos(double x, double* sn, double* cs)
+ {
+@@ -41,6 +49,79 @@ static void* Aps5MemSet(void* dst, int value, size_t size)
+     return memset(dst, value, size);
+ }
+ 
++// Game libc results are the byte difference of the first mismatch (movzb/sub), not just its sign:
++// these return exactly that. bionic's memcmp only finds equal ranges fast.
++static int Aps5MemCmp(const void* a, const void* b, size_t size)
++{
++    const uint8_t* x = a;
++    const uint8_t* y = b;
++    size_t i = 0;
++    for (; i + 8 <= size; i += 8) {
++        uint64_t u, v;
++        memcpy(&u, x + i, 8);
++        memcpy(&v, y + i, 8);
++        if (u != v) break;
++    }
++    for (; i < size; ++i)
++        if (x[i] != y[i]) return (int)x[i] - (int)y[i];
++    return 0;
++}
++
++// bcmp: 0 or 1 (setne).
++static int Aps5Bcmp(const void* a, const void* b, size_t size)
++{
++    return memcmp(a, b, size) != 0;
++}
++
++static size_t Aps5StrLen(const char* s)
++{
++    return strlen(s);
++}
++
++static int Aps5StrCmp(const char* a, const char* b)
++{
++    const uint8_t* x = (const uint8_t*)a;
++    const uint8_t* y = (const uint8_t*)b;
++    while (*x && *x == *y) { ++x; ++y; }
++    return (int)*x - (int)*y;
++}
++
++static int Aps5StrNCmp(const char* a, const char* b, size_t size)
++{
++    const uint8_t* x = (const uint8_t*)a;
++    const uint8_t* y = (const uint8_t*)b;
++    for (; size; --size, ++x, ++y)
++        if (!*x || *x != *y) return (int)*x - (int)*y;
++    return 0;
++}
++
++static void* Aps5MemChr(const void* s, int c, size_t size)
++{
++    return memchr(s, c, size);
++}
++
++static char* Aps5StrChr(const char* s, int c)
++{
++    return strchr(s, c);
++}
++
++static char* Aps5StrRChr(const char* s, int c)
++{
++    return strrchr(s, c);
++}
++
++static size_t Aps5StrNLen(const char* s, size_t size)
++{
++    return strnlen(s, size);
++}
++
++// float f(void*, void*, float): no generated wrapper has this shape.
++static void Aps5Wrap_fFppf(x64emu_t* emu, uintptr_t fcn)
++{
++    float (*fn)(void*, void*, float) = (float (*)(void*, void*, float))fcn;
++    emu->xmm[0].f[0] = fn((void*)R_RDI, (void*)R_RSI, emu->xmm[0].f[0]);
++}
++
+ typedef struct aps5hot_s {
+     const char* module;     // file name of the loaded module
+     uintptr_t   offset;     // function address in the module
+@@ -57,8 +138,83 @@ static const aps5hot_t hot[] = {
+     {"libc.prx.guest.prx", 0x10430, 383, 0x9bbe0fbf4c4671e6ull, pFpiL, Aps5MemSet, "memset"},
+     {"libc.prx.guest.prx", 0x4e2f0, 1213, 0xb530e8a466540be7ull, vFdpp, Aps5SinCos, "sincos"},
+     {"libc.prx.guest.prx", 0x7f150, 62, 0xaae49931ef1d8a5full, iFppi, Aps5CompareExchange4, "cas4"},
++    // Mewgenics (PPSA37318), game libc (addresses from the NIDs). memcpy and memmove share one body
++    // that handles overlap (memmove enters it past memcpy's checks), so both become memmove.
++    {"libc.prx.guest.prx", 0x3c00, 2245, 0x42703b7014ac536cull, pFppL, Aps5MemCpy, "memcpy"},
++    {"libc.prx.guest.prx", 0x3bc0, 54, 0xbf495afa54557811ull, pFppL, Aps5MemCpy, "memmove"},
++    {"libc.prx.guest.prx", 0x10710, 383, 0x317fc93e3fe26b81ull, pFpiL, Aps5MemSet, "memset"},
++    {"libc.prx.guest.prx", 0x335c0, 34, 0xb86f80af015e3b10ull, iFppL, Aps5Bcmp, "bcmp"},
++    {"libc.prx.guest.prx", 0x6e1a0, 59, 0x7341a680b2d4e8dbull, iFppL, Aps5MemCmp, "memcmp"},
++    {"libc.prx.guest.prx", 0x4580, 96, 0x2c7eb6af0f9ae2c7ull, LFp, Aps5StrLen, "strlen"},
++    {"libc.prx.guest.prx", 0x35e40, 131, 0xf040588d6887a83aull, iFpp, Aps5StrCmp, "strcmp"},
++    {"libc.prx.guest.prx", 0x5220, 206, 0xbd31b1e4a949f617ull, iFppL, Aps5StrNCmp, "strncmp"},
++    {"libc.prx.guest.prx", 0x3ac0, 132, 0x2e70501a1594cd08ull, pFpiL, Aps5MemChr, "memchr"},
++    {"libc.prx.guest.prx", 0x4500, 95, 0x0eaaea440e90898dull, pFpi, Aps5StrChr, "strchr"},
++    {"libc.prx.guest.prx", 0x4940, 105, 0xa8878e09204a3709ull, pFpi, Aps5StrRChr, "strrchr"},
++    {"libc.prx.guest.prx", 0x6fdc0, 34, 0xd1f940d17dd501aeull, LFpL, Aps5StrNLen, "strnlen"},
++    // Mewgenics (PPSA37318) app.elf, FAudio (static, via SDL3): DspReverb_INTERNAL_ProcessChannel.
++    {"app.elf", 0x128e340, 759, 0x85b4be58126303f6ull, Aps5Wrap_fFppf, FaReverbProcessChannel, "faudio-reverb-channel"},
++    {"app.elf", 0x12968c0, 350, 0x5e996309377c029dull, vFuuuppp, FaMix2in2out, "faudio-mix-2in-2out"},
++    {"app.elf", 0x12957f0, 586, 0x819fa00e1b494a13ull, vFpuf, FaAmplify, "faudio-amplify"},
+ };
+ 
++// Mewgenics (PPSA37318) renders through SDL_GPU, whose only backend in app.elf is Agc. With
++// APS5_SDLGPU_VULKAN=1 that backend's CreateDevice returns SDL's native Vulkan backend instead
++// (libaps5sdlgpu.so): its SDL_GPUDevice slots become bridges, so the title's x86 SDL_GPU frontend
++// calls native Vulkan code directly (no AGC command buffers, no PM4 translation).
++#define APS5_SDLGPU_CREATE_DEVICE 0x126e2d0
++#define APS5_SDLGPU_CREATE_DEVICE_HASH 0xfb170c2bbebbdcf3ull  // FNV-1a of its first 64 bytes
++#define APS5_SDLGPU_BOOTSTRAP_CREATE 0x1a6e468                // AGCDriver.CreateDevice (relocated data)
++static char aps5SdlGpuShaders[4096];
++static uintptr_t aps5SdlGpuAgcCreateDevice;                   // the Agc one, kept as the fallback
++
++// Slot kinds (libaps5sdlgpu adapters): 1 = up to 6 integer arguments, 2 = (pointer, SDL_FColor by
++// value: two xmm halves), 3 = 7 integer arguments (the 7th past the return address).
++static void Aps5SdlGpuSlot6(x64emu_t* emu, uintptr_t fcn)
++{
++    uint64_t (*fn)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) = (void*)fcn;
++    R_RAX = fn(R_RDI, R_RSI, R_RDX, R_RCX, R_R8, R_R9);
++}
++static void Aps5SdlGpuSlotColor(x64emu_t* emu, uintptr_t fcn)
++{
++    uint64_t (*fn)(uint64_t, float, float, float, float) = (void*)fcn;
++    R_RAX = fn(R_RDI, emu->xmm[0].f[0], emu->xmm[0].f[1], emu->xmm[1].f[0], emu->xmm[1].f[1]);
++}
++static void Aps5SdlGpuSlot7(x64emu_t* emu, uintptr_t fcn)
++{
++    uint64_t (*fn)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) = (void*)fcn;
++    R_RAX = fn(R_RDI, R_RSI, R_RDX, R_RCX, R_R8, R_R9, *(uint64_t*)(R_RSP + 8));
++}
++
++static void* Aps5SdlGpuCreateDevice(int debugMode, int preferLowPower, uint32_t props)
++{
++    void* library = dlopen("libaps5sdlgpu.so", RTLD_NOW);
++    void* (*create)(bool, bool, uint32_t, const unsigned char**, int*) = library ? dlsym(library, "Aps5SdlGpu_CreateDevice") : NULL;
++    void (*shaders)(const char*) = library ? dlsym(library, "Aps5SdlGpu_SetShaderDir") : NULL;
++    if (!create || !shaders) {
++        printf_log(LOG_NONE, "[aps5hot] libaps5sdlgpu.so is missing (%s): SDL_GPU stays on Agc\n", dlerror());
++        return (void*)RunFunctionFmt(aps5SdlGpuAgcCreateDevice, "iiu", debugMode, preferLowPower, props);
++    }
++    shaders(aps5SdlGpuShaders);
++    const unsigned char* kinds = NULL;
++    int count = 0;
++    void** device = create(debugMode & 1, preferLowPower & 1, props, &kinds, &count);
++    if (!device) {
++        printf_log(LOG_NONE, "[aps5hot] native Vulkan SDL_GPU device failed: SDL_GPU stays on Agc\n");
++        return (void*)RunFunctionFmt(aps5SdlGpuAgcCreateDevice, "iiu", debugMode, preferLowPower, props);
++    }
++    static const wrapper_t wrappers[] = {NULL, Aps5SdlGpuSlot6, Aps5SdlGpuSlotColor, Aps5SdlGpuSlot7};
++    for (int i = 0; i < count; ++i)
++        device[i] = kinds[i] && kinds[i] < 4 && device[i] ? (void*)AddCheckBridge(my_context->system, wrappers[kinds[i]], device[i], 0, "sdlgpu") : NULL;
++    printf_log(LOG_INFO, "[aps5hot] SDL_GPU: native Vulkan device %p, %d slots bridged\n", device, count);
++    return device;
++}
++static void Aps5SdlGpuWrapCreateDevice(x64emu_t* emu, uintptr_t fcn)
++{
++    void* (*fn)(int, int, uint32_t) = (void*)fcn;
++    R_RAX = (uintptr_t)fn((int)(R_RDI & 0xff), (int)(R_RSI & 0xff), (uint32_t)R_RDX);
++}
++
+ static uint64_t Fnv1a(const uint8_t* p, size_t size)
+ {
+     uint64_t h = 0xcbf29ce484222325ull;
+@@ -117,6 +273,28 @@ int Aps5HotPatchModule(const char* path, uintptr_t delta)
+             strcat(names, hot[i].name);
+         }
+     }
++    const char* sdlgpu = getenv("APS5_SDLGPU_VULKAN");
++    if (!strcmp(file, "app.elf") && sdlgpu && *sdlgpu && strcmp(sdlgpu, "0")) {
++        uintptr_t addr = delta + APS5_SDLGPU_CREATE_DEVICE;
++        uintptr_t* slot = (uintptr_t*)(delta + APS5_SDLGPU_BOOTSTRAP_CREATE);
++        if (Fnv1a((const uint8_t*)addr, 64) == APS5_SDLGPU_CREATE_DEVICE_HASH && *slot == addr) {
++            // Shaders: <game>/sdlgpu (the directory of app.elf), or APS5_SDLGPU_SHADERS.
++            const char* dir = getenv("APS5_SDLGPU_SHADERS");
++            if (dir && *dir)
++                snprintf(aps5SdlGpuShaders, sizeof(aps5SdlGpuShaders), "%s", dir);
++            else if (file > path)
++                snprintf(aps5SdlGpuShaders, sizeof(aps5SdlGpuShaders), "%.*s/sdlgpu", (int)(file - path - 1), path);
++            else
++                snprintf(aps5SdlGpuShaders, sizeof(aps5SdlGpuShaders), "sdlgpu");
++            // The bootstrap's CreateDevice pointer (data) is swapped; the Agc function stays intact.
++            aps5SdlGpuAgcCreateDevice = addr;
++            *slot = AddCheckBridge(my_context->system, Aps5SdlGpuWrapCreateDevice, Aps5SdlGpuCreateDevice, 0, "sdlgpu-create-device");
++            ++patched;
++            strncat(names, names[0] ? " sdlgpu-vulkan" : "sdlgpu-vulkan", sizeof(names) - strlen(names) - 1);
++        } else {
++            printf_log(LOG_NONE, "[aps5hot] APS5_SDLGPU_VULKAN: the Agc CreateDevice of this app.elf differs, staying on Agc\n");
++        }
++    }
+     if (patched || skipped)
+         printf_log(LOG_INFO, "[aps5hot] %s: %d native (%s), %d skipped (code differs)\n", file, patched, names, skipped);
+     return patched;
+diff --git a/src/tools/aps5hot_faudio.h b/src/tools/aps5hot_faudio.h
+new file mode 100644
+index 0000000..4a9e286
+--- /dev/null
++++ b/src/tools/aps5hot_faudio.h
+@@ -0,0 +1,150 @@
++// SPDX-License-Identifier: Zlib
++// FAudio's reverb channel (FNA-XNA/FAudio src/FAudioFX_reverb.c, DspReverb_INTERNAL_ProcessChannel
++// and the inline helpers it uses), for titles that link FAudio statically (Mewgenics, through SDL3).
++// The structures are FAudio's own; the x86-64 and arm64 layouts are the same (checked below against
++// the offsets the title's code uses). The only change: the delay-line indices wrap by a compare
++// instead of an integer division per access (the same value whenever the index is in range, the
++// division kept for an index that is not). FAudio is (c) Ethan Lee, zlib license.
++#ifndef __APS5HOT_FAUDIO_H_
++#define __APS5HOT_FAUDIO_H_
++
++#include <stddef.h>
++#include <stdint.h>
++
++typedef struct FaDelay {
++    int32_t sampleRate;
++    uint32_t capacity, delay, read_idx, write_idx;
++    float* buffer;
++} FaDelay;
++
++typedef struct FaBiQuad {
++    int32_t sampleRate;
++    float a0, a1, a2;
++    float b1, b2;
++    float c0, d0;
++    float delay0, delay1;
++} FaBiQuad;
++
++typedef struct FaCombShelving {
++    FaDelay comb_delay;
++    float comb_feedback_gain;
++    FaBiQuad low_shelving;
++    FaBiQuad high_shelving;
++} FaCombShelving;
++
++typedef struct FaAllPass {
++    FaDelay delay;
++    float feedback_gain;
++} FaAllPass;
++
++typedef struct FaReverbChannel {
++    FaDelay reverb_delay;
++    FaCombShelving lpf_comb[8];
++    FaAllPass apf_out[4];
++    FaBiQuad room_high_shelf;
++    float early_gain;
++    float gain;
++} FaReverbChannel;
++
++typedef struct FaReverb {
++    FaDelay early_delay;
++    FaAllPass apf_in[1];
++    int32_t in_channels, out_channels, reverb_channels;
++    FaReverbChannel channel[5];
++    float early_gain, reverb_gain, room_gain, wet_ratio, dry_ratio;
++} FaReverb;
++
++_Static_assert(offsetof(FaReverbChannel, lpf_comb) == 0x20, "FAudio channel layout");
++_Static_assert(offsetof(FaReverbChannel, room_high_shelf) == 0x480, "FAudio channel layout");
++_Static_assert(offsetof(FaReverbChannel, gain) == 0x4ac, "FAudio channel layout");
++_Static_assert(offsetof(FaReverb, reverb_gain) == 0x17cc, "FAudio reverb layout");
++_Static_assert(offsetof(FaReverb, room_gain) == 0x17d0, "FAudio reverb layout");
++
++static inline uint32_t FaNext(uint32_t index, uint32_t capacity)
++{
++    uint32_t next = index + 1;
++    if (next >= capacity) next = next == capacity ? 0 : next % capacity;
++    return next;
++}
++
++static inline float FaDelayRead(FaDelay* filter)
++{
++    float delay_out = filter->buffer[filter->read_idx];
++    filter->read_idx = FaNext(filter->read_idx, filter->capacity);
++    return delay_out;
++}
++
++static inline void FaDelayWrite(FaDelay* filter, float sample)
++{
++    filter->buffer[filter->write_idx] = sample;
++    filter->write_idx = FaNext(filter->write_idx, filter->capacity);
++}
++
++static inline float FaDelayProcess(FaDelay* filter, float sample_in)
++{
++    float delay_out = FaDelayRead(filter);
++    FaDelayWrite(filter, sample_in);
++    return delay_out;
++}
++
++static inline float FaBiQuadProcess(FaBiQuad* filter, float sample_in)
++{
++    float result = (filter->a0 * sample_in) + filter->delay0;
++    filter->delay0 = (filter->a1 * sample_in) - (filter->b1 * result) + filter->delay1;
++    filter->delay1 = (filter->a2 * sample_in) - (filter->b2 * result);
++    return (result * filter->c0) + (sample_in * filter->d0);
++}
++
++static inline float FaCombShelvingProcess(FaCombShelving* filter, float sample_in)
++{
++    float delay_out = FaDelayRead(&filter->comb_delay);
++    float feedback = FaBiQuadProcess(&filter->high_shelving, delay_out);
++    feedback = FaBiQuadProcess(&filter->low_shelving, feedback);
++    FaDelayWrite(&filter->comb_delay, sample_in + (filter->comb_feedback_gain * feedback));
++    return delay_out;
++}
++
++static inline float FaAllPassProcess(FaAllPass* filter, float sample_in)
++{
++    float delay_out = FaDelayRead(&filter->delay);
++    float to_buf = sample_in + (filter->feedback_gain * delay_out);
++    FaDelayWrite(&filter->delay, to_buf);
++    return delay_out - (filter->feedback_gain * to_buf);
++}
++
++static float FaReverbProcessChannel(FaReverb* reverb, FaReverbChannel* channel, float sample_in)
++{
++    float revdelay = FaDelayProcess(&channel->reverb_delay, sample_in);
++    float sample_out = 0.0f;
++    for (int i = 0; i < 8; i += 1)
++        sample_out += FaCombShelvingProcess(&channel->lpf_comb[i], revdelay);
++    sample_out /= 8.0f;
++    for (int i = 0; i < 4; i += 1)
++        sample_out = FaAllPassProcess(&channel->apf_out[i], sample_out);
++    float early_late = (sample_in * channel->early_gain) + (sample_out * reverb->reverb_gain);
++    sample_out = FaBiQuadProcess(&channel->room_high_shelf, early_late * reverb->room_gain);
++    return sample_out * channel->gain;
++}
++
++// FAudio_INTERNAL_Mix_2in_2out_Scalar (src/FAudio_internal_simd.c), the sum as the title's
++// compiler contracted it: dst += fma(s0, c0, s1 * c1), so the result is bit-identical.
++static void FaMix2in2out(uint32_t toMix, uint32_t unused1, uint32_t unused2, float* src, float* dst, float* coefficients)
++{
++    (void)unused1;
++    (void)unused2;
++    const float c0 = coefficients[0], c1 = coefficients[1], c2 = coefficients[2], c3 = coefficients[3];
++    for (uint32_t i = 0; i < toMix; i += 1, src += 2, dst += 2) {
++        const float s0 = src[0], s1 = src[1];
++        dst[0] += __builtin_fmaf(s0, c0, s1 * c1);
++        dst[1] += __builtin_fmaf(s0, c2, s1 * c3);
++    }
++}
++
++// FAudio_INTERNAL_Amplify (_SSE2 in the title, _NEON here: the same products).
++static void FaAmplify(float* output, uint32_t totalSamples, float volume)
++{
++    for (uint32_t i = 0; i < totalSamples; i += 1)
++        output[i] *= volume;
++}
++
++#endif
+diff --git a/src/wrapped/generated/functions_list.txt b/src/wrapped/generated/functions_list.txt
+index d23f72f..b7fbe81 100644
+--- a/src/wrapped/generated/functions_list.txt
++++ b/src/wrapped/generated/functions_list.txt
+@@ -5777,6 +5777,7 @@ wrappedlibc:
+   - getopt
+   - register_printf_specifier
+   - sigaction
++  - sigprocmask
+ - iFipV:
+   - __printf_chk
+   - dprintf
+@@ -6530,6 +6531,8 @@ wrappedlibpthread:
+ - vFppp:
+   - _pthread_cleanup_push
+   - _pthread_cleanup_push_defer
++- iFipp:
++  - pthread_sigmask
+ - iFpLp:
+   - pthread_attr_getaffinity_np
+   - pthread_attr_setaffinity_np
+diff --git a/src/wrapped/generated/wrappedlibctypes.h b/src/wrapped/generated/wrappedlibctypes.h
+index fe264d9..7287ce9 100644
+--- a/src/wrapped/generated/wrappedlibctypes.h
++++ b/src/wrapped/generated/wrappedlibctypes.h
+@@ -281,6 +281,7 @@ typedef int32_t (*iFppipppp_t)(void*, void*, int32_t, void*, void*, void*, void*
+ 	GO(getopt, iFipp_t) \
+ 	GO(register_printf_specifier, iFipp_t) \
+ 	GO(sigaction, iFipp_t) \
++	GO(sigprocmask, iFipp_t) \
+ 	GO(__printf_chk, iFipV_t) \
+ 	GO(dprintf, iFipV_t) \
+ 	GO(vdprintf, iFipA_t) \
+diff --git a/src/wrapped/generated/wrappedlibpthreadtypes.h b/src/wrapped/generated/wrappedlibpthreadtypes.h
+index 4b5b6d0..aa4ffdf 100644
+--- a/src/wrapped/generated/wrappedlibpthreadtypes.h
++++ b/src/wrapped/generated/wrappedlibpthreadtypes.h
+@@ -21,6 +21,7 @@ typedef int32_t (*iFpi_t)(void*, int32_t);
+ typedef int32_t (*iFpL_t)(void*, uintptr_t);
+ typedef int32_t (*iFpp_t)(void*, void*);
+ typedef void (*vFppp_t)(void*, void*, void*);
++typedef int32_t (*iFipp_t)(int32_t, void*, void*);
+ typedef int32_t (*iFpLp_t)(void*, uintptr_t, void*);
+ typedef int32_t (*iFppu_t)(void*, void*, uint32_t);
+ typedef int32_t (*iFppL_t)(void*, void*, uintptr_t);
+@@ -113,6 +114,7 @@ typedef int32_t (*iFpppp_t)(void*, void*, void*, void*);
+ 	GO(pthread_setaffinity_np@GLIBC_2.3.3, iFpp_t) \
+ 	GO(_pthread_cleanup_push, vFppp_t) \
+ 	GO(_pthread_cleanup_push_defer, vFppp_t) \
++	GO(pthread_sigmask, iFipp_t) \
+ 	GO(pthread_attr_getaffinity_np, iFpLp_t) \
+ 	GO(pthread_attr_setaffinity_np, iFpLp_t) \
+ 	GO(pthread_getaffinity_np, iFpLp_t) \
+diff --git a/src/wrapped/wrappedlibc.c b/src/wrapped/wrappedlibc.c
+index dd02bad..af50501 100644
+--- a/src/wrapped/wrappedlibc.c
++++ b/src/wrapped/wrappedlibc.c
+@@ -1062,6 +1062,9 @@ EXPORT uint64_t my__ITM_RU8(const uint64_t * a) { (void)a; printf("warning _ITM_
+ EXPORT void my__ITM_memcpyRtWn(void * a, const void * b, size_t c) { (void)a; (void)b; (void)c; printf("warning _ITM_memcpyRtWn called\n"); }
+ EXPORT void my__ITM_memcpyRnWt(void * a, const void * b, size_t c) { (void)a; (void)b; (void)c; printf("warning _ITM_memcpyRnWt called\n"); }
+ 
++#ifdef ANDROID
++void box64_sigmask_count(int site);
++#endif
+ EXPORT void my_longjmp(x64emu_t* emu, /*struct __jmp_buf_tag __env[1]*/void *p, int32_t __val);
+ EXPORT void my__longjmp(x64emu_t* emu, /*struct __jmp_buf_tag __env[1]*/void *p, int32_t __val) __attribute__((alias("my_longjmp")));
+ EXPORT void my_siglongjmp(x64emu_t* emu, /*struct __jmp_buf_tag __env[1]*/void *p, int32_t __val) __attribute__((alias("my_longjmp")));
+@@ -3561,6 +3564,9 @@ void EXPORT my_longjmp(x64emu_t* emu, /*struct __jmp_buf_tag __env[1]*/void *p,
+     R_RAX = __val?__val:1;
+     R_RIP = jpbuff->save_rip;
+     if(((__jmp_buf_tag_t*)p)->__mask_was_saved) {
++        #ifdef ANDROID
++        box64_sigmask_count(3);
++        #endif
+         sigprocmask(SIG_SETMASK, &((__jmp_buf_tag_t*)p)->__saved_mask, NULL);
+     }
+     if(emu->flags.quitonlongjmp) {
+@@ -3582,6 +3588,9 @@ EXPORT int32_t my___sigsetjmp(x64emu_t* emu, /*struct __jmp_buf_tag __env[1]*/vo
+     jpbuff->save_rsp = R_RSP+sizeof(uintptr_t); // include "return address"
+     jpbuff->save_rip = *(uintptr_t*)(R_RSP);
+     if(savesigs) {
++        #ifdef ANDROID
++        box64_sigmask_count(2);
++        #endif
+         if(sigprocmask(SIG_SETMASK, NULL, &((__jmp_buf_tag_t*)p)->__saved_mask))
+             ((__jmp_buf_tag_t*)p)->__mask_was_saved = 0;
+         else
+@@ -3595,6 +3604,13 @@ EXPORT int32_t my___sigsetjmp(x64emu_t* emu, /*struct __jmp_buf_tag __env[1]*/vo
+     }
+     return 0;
+ }
++#ifdef ANDROID
++EXPORT int my_sigprocmask(int how, void* set, void* old)
++{
++    box64_sigmask_count(0);
++    return sigprocmask(how, (const sigset_t*)set, (sigset_t*)old);
++}
++#endif
+ EXPORT int32_t my_sigsetjmp(x64emu_t* emu, /*struct __jmp_buf_tag __env[1]*/void *p, int savesigs)
+ {
+     return my___sigsetjmp(emu, p, savesigs);
+diff --git a/src/wrapped/wrappedlibc_private.h b/src/wrapped/wrappedlibc_private.h
+index 84a7e7e..0d6a344 100644
+--- a/src/wrapped/wrappedlibc_private.h
++++ b/src/wrapped/wrappedlibc_private.h
+@@ -1942,7 +1942,11 @@ GO(__sigpause, iFii)
+ //GOW(sigpause, 
+ #endif
+ GO(sigpending, iFp)
++#ifdef ANDROID
++GOWM(sigprocmask, iFipp)
++#else
+ GOW(sigprocmask, iFipp)
++#endif
+ //GOW(sigqueue, "iFii?")
+ GO(sigrelse, iFi)
+ GOW(sigreturn, iFp)
+diff --git a/src/wrapped/wrappedlibpthread.c b/src/wrapped/wrappedlibpthread.c
+index 91330f2..5d0b2ef 100644
+--- a/src/wrapped/wrappedlibpthread.c
++++ b/src/wrapped/wrappedlibpthread.c
+@@ -78,4 +78,14 @@ extern int __pthread_rwlock_wrlock(void*);
+ extern int __pthread_setspecific(size_t, void*);
+ #endif
+ 
++#ifdef ANDROID
++void box64_sigmask_count(int site);
++EXPORT int my_pthread_sigmask(int how, void* set, void* old)
++{
++    box64_sigmask_count(1);
++    return pthread_sigmask(how, (const sigset_t*)set, (sigset_t*)old);
++}
++#endif
++
+ #include "wrappedlib_init.h"
++
+diff --git a/src/wrapped/wrappedlibpthread_private.h b/src/wrapped/wrappedlibpthread_private.h
+index 187b5e8..2bb38b6 100644
+--- a/src/wrapped/wrappedlibpthread_private.h
++++ b/src/wrapped/wrappedlibpthread_private.h
+@@ -272,7 +272,11 @@ GO(pthread_setschedparam, iFLip)
+ GO(pthread_setschedprio, iFLi)
+ GO(__pthread_setspecific, iFLp)
+ GO(pthread_setspecific, iFup)
++#ifdef ANDROID
++GOM(pthread_sigmask, iFipp)
++#else
+ GO(pthread_sigmask, iFipp)
++#endif
+ GO(pthread_spin_destroy, iFp)
+ GO(pthread_spin_init, iFpi)
+ GO(pthread_spin_lock, iFp)

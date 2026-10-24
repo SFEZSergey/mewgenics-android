@@ -1,0 +1,144 @@
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp b/core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp
+index 37fdbce..aaab429 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp
+@@ -160,6 +160,9 @@ struct HostImports {
+     std::uint64_t refreshedGeneration = 0;
+     // The largest import, so a changed range finds every import it overlaps (importsUntouched).
+     std::uint64_t largestImport = 0;
++    // GPU mappings waiting for their imports (ImportMappedRanges, batched) and the last flush.
++    std::vector<std::uint64_t> pendingMapped;
++    std::chrono::steady_clock::time_point lastMappedFlush{};
+     // Bumped whenever an import is dropped, so HostImport pointers taken under the lock earlier can be
+     // reused while it is unchanged.
+     std::uint64_t epoch = 1;
+@@ -2137,8 +2140,108 @@ const HostImport* HostImportFor(const Context& context, std::uint64_t address, s
+     return entry != nullptr && findImport(state, address, address + bytes) == entry ? entry : nullptr;
+ }
+ 
++namespace {
++
++// [gpu-map] line every 10 s (always on; one atomic add per GPU mapping): how often the guest maps
++// GPU memory, how many registered ranges each registry lease carried and the time spent, so the
++// cost of the lease per mapping can be judged from any session's log.
++struct GpuMapCounters {
++    std::atomic<std::uint64_t> calls{0}, leased{0}, ranges{0}, mapped{0}, imported{0}, nanoseconds{0};
++    std::atomic<std::int64_t> reported{0};
++};
++
++GpuMapCounters& gpuMapCounters() {
++    static GpuMapCounters counters;
++    return counters;
++}
++
++void reportGpuMaps() {
++    auto& counters = gpuMapCounters();
++    const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
++    auto last = counters.reported.load(std::memory_order_relaxed);
++    if (last == 0) {
++        counters.reported.compare_exchange_strong(last, now, std::memory_order_relaxed);
++        return;
++    }
++    if (now - last < 10'000'000'000ll || !counters.reported.compare_exchange_strong(last, now, std::memory_order_relaxed)) return;
++    const auto calls = counters.calls.exchange(0);
++    const auto leased = counters.leased.exchange(0);
++    const auto ranges = counters.ranges.exchange(0);
++    const auto imported = counters.imported.exchange(0);
++    const auto mapped = counters.mapped.exchange(0);
++    const auto ns = counters.nanoseconds.exchange(0);
++    std::fprintf(stderr, "[gpu-map] 10 s: %llu GPU mappings, %llu registry leases of %.0f ranges on average, %llu mapped ranges, %llu already imported; %.1f ms in total\n", static_cast<unsigned long long>(calls), static_cast<unsigned long long>(leased), leased != 0 ? static_cast<double>(ranges) / static_cast<double>(leased) : 0.0, static_cast<unsigned long long>(mapped), static_cast<unsigned long long>(imported), static_cast<double>(ns) / 1e6);
++}
++
++struct GpuMapTiming {
++    std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
++    ~GpuMapTiming() {
++        gpuMapCounters().nanoseconds.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count()), std::memory_order_relaxed);
++        reportGpuMaps();
++    }
++};
++
++}
++
++// GPU mappings are imported in batches: each import pass takes a lease of the whole registry (an
++// x86 walk and a pin per registered range, every guest heap block among them), and a long session
++// mapping GPU memory several times a frame spent a fifth of the game thread there. A mapping's
++// address is queued and the queue is imported at most every APS5_GPU_MAP_BATCH_MS under one lease,
++// here or at the next host-import lookup of a draw. Off by default (0: imports at once): a draw
++// that reaches a queued mapping takes the copy path, and Mewgenics' intro then showed blocks
++// instead of textures (2026-10-23); with ~1400 registered ranges a lease is ~0.4 ms anyway.
++std::chrono::milliseconds gpuMapBatch() {
++    static const std::chrono::milliseconds batch{[] {
++        const char* text = std::getenv("APS5_GPU_MAP_BATCH_MS");
++        return text != nullptr ? std::strtoll(text, nullptr, 10) : 0ll;
++    }()};
++    return batch;
++}
++
++// Under state.mutex, for the state's device: imports every queued mapping under one lease.
++void flushPendingMapped(const Context& context, HostImports& state) {
++    state.lastMappedFlush = std::chrono::steady_clock::now();
++    if (state.pendingMapped.empty()) return;
++    const auto current = GuestAllocations::GuestAllocationsAcquire_nid_postfix();
++    gpuMapCounters().leased.fetch_add(1, std::memory_order_relaxed);
++    gpuMapCounters().ranges.fetch_add(current.size(), std::memory_order_relaxed);
++    std::sort(state.pendingMapped.begin(), state.pendingMapped.end());
++    state.pendingMapped.erase(std::unique(state.pendingMapped.begin(), state.pendingMapped.end()), state.pendingMapped.end());
++    for (const auto address : state.pendingMapped) {
++        try {
++            static_cast<void>(importAllocation(context, state, address, current));
++        } catch (const std::exception& error) {
++            std::fprintf(stderr, "[gpu] import of GPU memory mapped at 0x%llx failed: %s\n", static_cast<unsigned long long>(address), error.what());
++        }
++    }
++    state.pendingMapped.clear();
++}
++
+ bool ImportMappedRanges(const Context& context, const GuestAllocations::Mapped& ranges, std::uint64_t generation, bool adoptDevice) {
+     if (context.hostImportAlignment == 0) return true;
++    const GpuMapTiming timing;
++    if (gpuMapBatch().count() > 0 && !adoptDevice) {
++        gpuMapCounters().calls.fetch_add(1, std::memory_order_relaxed);
++        gpuMapCounters().mapped.fetch_add(ranges.size(), std::memory_order_relaxed);
++        ensurePinWaiter();
++        auto& state = Imports();
++        std::lock_guard lock(state.mutex);
++        if (state.device != context.device || state.watchDevice != context.device) return false;
++        if (state.refreshedGeneration > generation) return true;
++        for (const auto& mapped : ranges) {
++            const auto range = mapped.lock();
++            if (range == nullptr) continue;
++            if (const auto* existing = findImport(state, range->address, range->address + 1); existing != nullptr && std::any_of(existing->ranges.begin(), existing->ranges.end(), [&](const auto& held) { return held.get() == range.get(); })) {
++                gpuMapCounters().imported.fetch_add(1, std::memory_order_relaxed);
++                continue;
++            }
++            state.pendingMapped.push_back(range->address);
++        }
++        if (!state.pendingMapped.empty() && std::chrono::steady_clock::now() - state.lastMappedFlush >= gpuMapBatch()) flushPendingMapped(context, state);
++        return true;
++    }
++    gpuMapCounters().calls.fetch_add(1, std::memory_order_relaxed);
++    gpuMapCounters().mapped.fetch_add(ranges.size(), std::memory_order_relaxed);
+     ensurePinWaiter();
+     auto& state = Imports();
+     std::lock_guard lock(state.mutex);
+@@ -2152,9 +2255,12 @@ bool ImportMappedRanges(const Context& context, const GuestAllocations::Mapped&
+         return true;
+     }
+     if (!adopting) current = GuestAllocations::GuestAllocationsAcquire_nid_postfix();
++    gpuMapCounters().leased.fetch_add(1, std::memory_order_relaxed);
++    gpuMapCounters().ranges.fetch_add(current.size(), std::memory_order_relaxed);
+     for (const auto& mapped : ranges) {
+         const auto range = mapped.lock();
+         if (range == nullptr || leasedRangeOwner(current, range->address) != range) continue;
++        if (const auto* existing = findImport(state, range->address, range->address + 1); existing != nullptr && std::any_of(existing->ranges.begin(), existing->ranges.end(), [&](const auto& held) { return held.get() == range.get(); })) gpuMapCounters().imported.fetch_add(1, std::memory_order_relaxed);
+         try {
+             if (importAllocation(context, state, range->address, current) == nullptr && GuestAllocations::GuestAllocationsGeneration_nid_postfix() != generation) state.failed.erase(importRun(current, range->address).base);
+         } catch (const std::exception& error) {
+@@ -3859,6 +3965,7 @@ std::uint64_t HostImportSerial(const Context& context, std::uint64_t address, st
+     if (context.hostImportAlignment == 0 || bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return 0;
+     auto& state = Imports();
+     std::lock_guard lock(state.mutex);
++    if (!state.pendingMapped.empty() && state.device == context.device && std::chrono::steady_clock::now() - state.lastMappedFlush >= gpuMapBatch()) flushPendingMapped(context, state);
+     // An import whose registered range changed must not be reused: reconcile first, as an upload
+     // does (the walk only runs when the registry changed since the last one).
+     // Logged changes that miss the imports only move the reconciled generation; the generation is

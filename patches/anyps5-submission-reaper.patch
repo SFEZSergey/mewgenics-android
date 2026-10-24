@@ -1,0 +1,84 @@
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Queues/QueueWorker.cpp	2026-10-24 13:46:48.849748953 +0500
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Queues/QueueWorker.cpp	2026-10-24 13:46:48.865748953 +0500
+@@ -6,10 +6,73 @@
+ #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+ #include "prx/libSceAgcDriver/Execution/include/WorkerSampler.hpp"
+ #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
++#include <chrono>
++#include <condition_variable>
+ #include <cstdlib>
++#include <mutex>
++#include <thread>
++#include <vector>
+ 
+ namespace AgcDriver::DriverDetail {
+ 
++namespace {
++
++// The finished submission's plain buffers (the command copy, register lists, label writes) die on
++// this thread: they were allocated by the submitting game thread, and freeing them here cost the
++// queue worker a cross-thread free per buffer at every dequeue. Flip requests and rendering waits
++// (their destructors may signal) still die in place. APS5_NO_SUBMISSION_REAPER=1 frees all in place.
++class SubmissionReaper {
++public:
++    static SubmissionReaper& Get() {
++        static auto* reaper = new SubmissionReaper();
++        return *reaper;
++    }
++    static bool Enabled() {
++        static const bool enabled = std::getenv("APS5_NO_SUBMISSION_REAPER") == nullptr;
++        return enabled;
++    }
++    void Take(Submission& submission) {
++        if (submission.commands.empty() && submission.registerLists.empty() && submission.labelWrites.empty()) return;
++        Buffers buffers{std::move(submission.commands), std::move(submission.registerLists), std::move(submission.labelWrites), std::move(submission.heldAtSubmit), std::move(submission.conditionalEnds)};
++        bool full = false;
++        {
++            std::lock_guard lock(mutex);
++            queued.push_back(std::move(buffers));
++            full = queued.size() >= WakeCount;
++        }
++        if (full) wake.notify_one();
++    }
++
++private:
++    struct Buffers {
++        std::vector<std::uint32_t> commands;
++        std::map<std::size_t, std::vector<std::uint32_t>> registerLists;
++        std::vector<std::uint64_t> labelWrites;
++        std::set<std::size_t> heldAtSubmit;
++        std::map<std::size_t, std::size_t> conditionalEnds;
++    };
++    SubmissionReaper() {
++        std::thread([this] { run(); }).detach();
++    }
++    void run() {
++        std::vector<Buffers> batch;
++        for (;;) {
++            {
++                std::unique_lock lock(mutex);
++                wake.wait_for(lock, std::chrono::milliseconds(50), [&] { return queued.size() >= WakeCount; });
++                batch.swap(queued);
++            }
++            batch.clear();
++        }
++    }
++    static constexpr std::size_t WakeCount = 32;
++    std::mutex mutex;
++    std::condition_variable wake;
++    std::vector<Buffers> queued;
++};
++
++}
++
+ FrameTiming* Driver::frameTiming() {
+     if (!APS5_ENABLE_TIMING_LOG) return nullptr;
+     if (pendingFrameTiming == nullptr) pendingFrameTiming = std::make_shared<FrameTiming>(++frameSerial, true);
+@@ -79,6 +142,7 @@
+     auto& costs = submissionCosts(id);
+     try {
+         for (;;) {
++            if (SubmissionReaper::Enabled()) SubmissionReaper::Get().Take(submission);
+             submission = Submission{};
+             static const bool traceGpu = std::getenv("APS5_TRACE_GPU") != nullptr;
+             {

@@ -1,0 +1,25 @@
+diff --git a/core/shader/recompiler/Recompiler.cpp b/core/shader/recompiler/Recompiler.cpp
+index ed77f1e..5c712bf 100644
+--- a/core/shader/recompiler/Recompiler.cpp
++++ b/core/shader/recompiler/Recompiler.cpp
+@@ -1072,6 +1072,20 @@ std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry&
+     if (profile) counters.populateNanoseconds.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count()), std::memory_order_relaxed);
+     counters.misses.fetch_add(1, std::memory_order_relaxed);
+     std::shared_ptr<const RecompileResult> shared = std::move(result);
++    // A result enters the memo at its snapshot's second sighting: snapshots holding a per-draw
++    // ring-buffer address (a sprite's constants) never come back, and inserting each one (an entry,
++    // an eviction destroying another result) cost a third of a miss. One table per thread; a slot
++    // holds the last index that hashed to it. APS5_NO_RESULT_MEMO_FILTER=1 inserts every miss.
++    static const bool filter = std::getenv("APS5_NO_RESULT_MEMO_FILTER") == nullptr;
++    if (filter) {
++        static thread_local std::vector<std::uint64_t> seen(std::size_t{1} << 16u);
++        auto& slot = seen[(index * 0x9e3779b97f4a7c15ull) >> 48u];
++        if (slot != index) {
++            slot = index;
++            reportResultMemo();
++            return shared;
++        }
++    }
+     {
+         std::lock_guard lock(source.mutex);
+         const auto found = source.memoIndex.find(index);

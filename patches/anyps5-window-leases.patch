@@ -1,0 +1,195 @@
+diff --git a/core/libs/prx/aps5native/Aps5Native.hpp b/core/libs/prx/aps5native/Aps5Native.hpp
+index 06e6733..7dfb849 100644
+--- a/core/libs/prx/aps5native/Aps5Native.hpp
++++ b/core/libs/prx/aps5native/Aps5Native.hpp
+@@ -47,6 +47,7 @@ enum X86Function : std::uint32_t {
+     RangeUnpinBatch,             // void (void** pins, u64 count): RangeUnpin пачкой (один переход в x86)
+     ReadableEnd,                 // u64 (begin, end): конец читаемого диапазона, содержащего [begin, end), или 0
+     GuestAllocationsGenerationCounter, // const atomic<u64>* (): счётчик поколения, натив читает его сам
++    LeaseAcquireWindow,          // void* lease (begin, end): x86 Lease читаемых диапазонов, пересекающих [begin, end)
+     X86FunctionCount
+ };
+ 
+diff --git a/core/libs/prx/aps5native/CoreShim.cpp b/core/libs/prx/aps5native/CoreShim.cpp
+index b4e06e1..9aaae9f 100644
+--- a/core/libs/prx/aps5native/CoreShim.cpp
++++ b/core/libs/prx/aps5native/CoreShim.cpp
+@@ -240,6 +240,9 @@ extern "C" Lease GuestAllocationsAcquire_nid_postfix() {
+     }
+     return lease;
+ }
++extern "C" Lease GuestAllocationsAcquireWindow_nid_postfix(std::uintptr_t begin, std::uintptr_t end) {
++    return adoptLease(reinterpret_cast<void*>(x86(Aps5Native::LeaseAcquireWindow, begin, end)));
++}
+ extern "C" std::uint64_t GuestAllocationsReadableEnd_nid_postfix(std::uintptr_t begin, std::uintptr_t end) {
+     return x86(Aps5Native::ReadableEnd, begin, end);
+ }
+diff --git a/core/libs/prx/aps5native/X86Host.cpp b/core/libs/prx/aps5native/X86Host.cpp
+index 8d5b1cf..78ece70 100644
+--- a/core/libs/prx/aps5native/X86Host.cpp
++++ b/core/libs/prx/aps5native/X86Host.cpp
+@@ -69,6 +69,10 @@ void* leaseAcquire() {
+     return new GuestAllocations::Lease(GuestAllocations::GuestAllocationsAcquire_nid_postfix());
+ }
+ 
++void* leaseAcquireWindow(std::uint64_t begin, std::uint64_t end) {
++    return new GuestAllocations::Lease(GuestAllocations::GuestAllocationsAcquireWindow_nid_postfix(static_cast<std::uintptr_t>(begin), static_cast<std::uintptr_t>(end)));
++}
++
+ std::uint64_t leaseCount(void* lease) {
+     return static_cast<GuestAllocations::Lease*>(lease)->size();
+ }
+@@ -254,6 +258,7 @@ void initializeCoreShim(Bridge& b) {
+     table[Aps5Native::RangeUnpin] = address(&rangeUnpin);
+     table[Aps5Native::RangeUnpinBatch] = address(&rangeUnpinBatch);
+     table[Aps5Native::ReadableEnd] = address(&GuestAllocations::GuestAllocationsReadableEnd_nid_postfix);
++    table[Aps5Native::LeaseAcquireWindow] = address(&leaseAcquireWindow);
+     for (std::uint64_t value : table) {
+         if (value == 0) fail("x86 function table", "incomplete");
+     }
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp b/core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp
+index aaab429..f873f31 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp
+@@ -653,6 +653,58 @@ std::size_t leasedIndexContaining(const GuestAllocations::Lease& lease, std::uin
+     return range.readable && address < range.address + range.bytes ? index : lease.size();
+ }
+ 
++// The lease the import paths need around [begin, end): the registry ranges overlapping the window
++// grown to the allocations of the ranges in it and to the imports overlapping it, so that every run
++// they build (a run stays within one allocation, see continuesRun) and every import they retire
++// sees the same ranges as in a lease of the whole registry. Leasing the whole registry copied and
++// pinned all ~1600 ranges through the box64 bridge for every GPU mapping (half of the game thread
++// in the rainy Mewgenics hub). APS5_FULL_LEASE=1, runs spanning allocations or a non-Android build
++// lease everything as before.
++bool windowLeases() {
++#ifdef __ANDROID__
++    static const bool enabled = std::getenv("APS5_FULL_LEASE") == nullptr && std::getenv("APS5_IMPORT_SPAN_ALLOCATIONS") == nullptr;
++    return enabled;
++#else
++    return false;
++#endif
++}
++
++void growToImports(const HostImports& state, std::uint64_t& begin, std::uint64_t& end) {
++    for (bool grown = true; grown;) {
++        grown = false;
++        auto it = state.imports.lower_bound(begin);
++        if (it != state.imports.begin()) --it;
++        for (; it != state.imports.end() && it->second.base < end; ++it) {
++            const auto importEnd = it->second.base + it->second.bytes;
++            if (importEnd <= begin) continue;
++            if (it->second.base < begin) begin = it->second.base, grown = true;
++            if (importEnd > end) end = importEnd, grown = true;
++        }
++    }
++}
++
++GuestAllocations::Lease leaseWindow(const HostImports& state, std::uint64_t begin, std::uint64_t end) {
++    if (!windowLeases()) return GuestAllocations::GuestAllocationsAcquire_nid_postfix();
++    if (begin >= end) return {};
++    growToImports(state, begin, end);
++    // The allocations of the ranges at the window's edges, then the imports over them, until stable.
++    for (int round = 0; round < 8; ++round) {
++        auto lease = GuestAllocations::GuestAllocationsAcquireWindow_nid_postfix(begin, end);
++        auto grownBegin = begin;
++        auto grownEnd = end;
++        for (const auto& range : lease) {
++            if (range->allocationBytes == 0) continue;
++            grownBegin = std::min<std::uint64_t>(grownBegin, range->allocationAddress);
++            grownEnd = std::max<std::uint64_t>(grownEnd, range->allocationAddress + range->allocationBytes);
++        }
++        growToImports(state, grownBegin, grownEnd);
++        if (grownBegin == begin && grownEnd == end) return lease;
++        begin = grownBegin;
++        end = grownEnd;
++    }
++    return GuestAllocations::GuestAllocationsAcquire_nid_postfix();
++}
++
+ ImportRun importRun(const GuestAllocations::Lease& lease, std::uint64_t address) {
+     const auto index = leasedIndexContaining(lease, address);
+     if (index == lease.size()) return {};
+@@ -1692,7 +1744,11 @@ bool WaitForLeasesAndImports(std::uintptr_t address, std::size_t bytes) noexcept
+                     }
+                 }
+             }
+-            const auto lease = overlapsImport ? GuestAllocations::GuestAllocationsAcquire_nid_postfix() : GuestAllocations::Lease{};
++            GuestAllocations::Lease lease;
++            if (overlapsImport) {
++                std::lock_guard importsLock(imports.mutex);
++                lease = leaseWindow(imports, address, end);
++            }
+             if (overlapsImport) {
+                 std::lock_guard importsLock(imports.mutex);
+                 for (auto it = imports.imports.begin(); it != imports.imports.end();) {
+@@ -1760,9 +1816,10 @@ bool WaitForLeasesAndImports(std::uintptr_t address, std::size_t bytes) noexcept
+                     synced = true;
+                     drained = true;
+                 }
+-                const auto lease = GuestAllocations::GuestAllocationsAcquire_nid_postfix();
++                GuestAllocations::Lease lease;
+                 {
+                     std::lock_guard importsLock(imports.mutex);
++                    lease = leaseWindow(imports, address, end);
+                     for (auto it = imports.imports.begin(); it != imports.imports.end();) {
+                         const auto base = it->first;
+                         if (base >= end || address >= base + it->second.bytes) {
+@@ -2254,7 +2311,17 @@ bool ImportMappedRanges(const Context& context, const GuestAllocations::Mapped&
+     } else if (state.refreshedGeneration > generation) {
+         return true;
+     }
+-    if (!adopting) current = GuestAllocations::GuestAllocationsAcquire_nid_postfix();
++    if (!adopting) {
++        std::uint64_t begin = std::numeric_limits<std::uint64_t>::max();
++        std::uint64_t end = 0;
++        for (const auto& mapped : ranges) {
++            const auto range = mapped.lock();
++            if (range == nullptr) continue;
++            begin = std::min<std::uint64_t>(begin, range->address);
++            end = std::max<std::uint64_t>(end, range->address + range->bytes);
++        }
++        current = leaseWindow(state, begin, end);
++    }
+     gpuMapCounters().leased.fetch_add(1, std::memory_order_relaxed);
+     gpuMapCounters().ranges.fetch_add(current.size(), std::memory_order_relaxed);
+     for (const auto& mapped : ranges) {
+diff --git a/core/libs/prx/libc/include/GuestAllocations.hpp b/core/libs/prx/libc/include/GuestAllocations.hpp
+index fca6f00..829cca5 100644
+--- a/core/libs/prx/libc/include/GuestAllocations.hpp
++++ b/core/libs/prx/libc/include/GuestAllocations.hpp
+@@ -44,6 +44,10 @@ void GuestAllocationsProtectKeep_nid_postfix(void* mutation, const void* pointer
+ void GuestAllocationsUnmap_nid_postfix(void* mutation, const void* pointer, std::size_t bytes, const std::function<void(const void*, std::size_t, const void*, bool)>& apply);
+ Lease GuestAllocationsAcquire_nid_postfix();
+ Lease GuestAllocationsAcquireAll_nid_postfix();
++// The readable ranges of GuestAllocationsAcquire that overlap [begin, end), in address order: a
++// caller that only looks at a few allocations leases those instead of the whole registry (a copy and
++// a pin of every range through the box64 bridge, per GPU mapping in the Mewgenics hub).
++Lease GuestAllocationsAcquireWindow_nid_postfix(std::uintptr_t begin, std::uintptr_t end);
+ // Changes whenever a mutation ends, so callers can cache facts about guest mappings between changes.
+ std::uint64_t GuestAllocationsGeneration_nid_postfix();
+ // The counter behind GuestAllocationsGeneration (an 8-byte atomic): the Android native group reads it
+diff --git a/core/libs/prx/libc/src/GuestAllocations.cpp b/core/libs/prx/libc/src/GuestAllocations.cpp
+index 1cabe76..5dbbe43 100644
+--- a/core/libs/prx/libc/src/GuestAllocations.cpp
++++ b/core/libs/prx/libc/src/GuestAllocations.cpp
+@@ -611,6 +611,19 @@ Lease GuestAllocationsAcquire_nid_postfix() {
+     return result;
+ }
+ 
++Lease GuestAllocationsAcquireWindow_nid_postfix(std::uintptr_t begin, std::uintptr_t end) {
++    std::lock_guard lock(registry().mutex);
++    Lease result;
++    if (begin >= end) return result;
++    const auto& ranges = registry().ranges;
++    auto it = ranges.upper_bound(begin);
++    if (it != ranges.begin() && std::prev(it)->second->address + std::prev(it)->second->bytes > begin) --it;
++    for (; it != ranges.end() && it->second->address < end; ++it) {
++        if (it->second->readable && it->second->bytes != 0) result.push_back(it->second);
++    }
++    return result;
++}
++
+ Lease GuestAllocationsAcquireAll_nid_postfix() {
+     std::lock_guard lock(registry().mutex);
+     Lease result;

@@ -1,0 +1,30 @@
+diff --git a/src/core/linux/SDL_udev.c b/src/core/linux/SDL_udev.c
+index 131a18c..cd0beb5 100644
+--- a/src/core/linux/SDL_udev.c
++++ b/src/core/linux/SDL_udev.c
+@@ -295,10 +295,17 @@ void SDL_UDEV_UnloadLibrary(void)
+     }
+ }
+ 
++/* Remember a failed load: without this, every joystick poll retries dlopen(). */
++static SDL_bool udev_load_failed = SDL_FALSE;
++
+ int SDL_UDEV_LoadLibrary(void)
+ {
+     int retval = 0, i;
+ 
++    if (udev_load_failed) {
++        return SDL_SetError("libudev unavailable");
++    }
++
+     if (!_this) {
+         return SDL_SetError("UDEV not initialized");
+     }
+@@ -336,6 +343,7 @@ int SDL_UDEV_LoadLibrary(void)
+ 
+         if (!_this->udev_handle) {
+             retval = -1;
++            udev_load_failed = SDL_TRUE;
+             /* Don't call SDL_SetError(): SDL_LoadObject already did. */
+         }
+     }

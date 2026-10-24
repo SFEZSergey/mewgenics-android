@@ -1,0 +1,94 @@
+diff --git a/core/libs/prx/aps5native/WriteWatchNative.cpp b/core/libs/prx/aps5native/WriteWatchNative.cpp
+index c2d7816..88b384a 100644
+--- a/core/libs/prx/aps5native/WriteWatchNative.cpp
++++ b/core/libs/prx/aps5native/WriteWatchNative.cpp
+@@ -533,22 +533,49 @@ private:
+         return (state & PROT_WRITE) != 0;
+     }
+ 
+-    // Текущие права страниц диапазона из /proc/self/maps (нативное чтение: box64 подменяет только x86).
+-    void readProtections(std::uintptr_t begin, std::uintptr_t end, std::vector<std::uint8_t>& pages) const {
++    // Текущие права страниц диапазонов из /proc/self/maps (нативное чтение: box64 подменяет только x86).
++    // Один проход файла на все диапазоны сразу: ядро генерирует его целиком на каждое открытие, а
++    // probe() раньше перечитывал его на каждый новый диапазон (в хабе Mewgenics — большая часть кадра).
++    struct ProtectionQuery {
++        std::uintptr_t begin;
++        std::uintptr_t end;
++        std::vector<std::uint8_t>* pages;
++    };
++    void readProtections(std::vector<ProtectionQuery>& queries) const {
++        if (queries.empty()) return;
++        std::sort(queries.begin(), queries.end(), [](const ProtectionQuery& a, const ProtectionQuery& b) { return a.begin < b.begin; });
+         std::FILE* maps = std::fopen("/proc/self/maps", "re");
+         if (maps == nullptr) return;
++        const std::uintptr_t lowest = queries.front().begin;
++        std::uintptr_t highest = 0;
++        for (const auto& query : queries) highest = std::max(highest, query.end);
+         char line[512];
++        std::size_t first_query = 0;
+         while (std::fgets(line, sizeof(line), maps) != nullptr) {
+-            unsigned long long first = 0, last = 0;
+-            char perms[8] = {};
+-            if (std::sscanf(line, "%llx-%llx %7s", &first, &last, perms) != 3) continue;
+-            if (last <= begin || first >= end) continue;
+-            const std::uint8_t protection = (perms[0] == 'r' ? PROT_READ : 0) | (perms[1] == 'w' ? PROT_WRITE : 0) | (perms[2] == 'x' ? PROT_EXEC : 0);
+-            for (auto page = std::max<std::uintptr_t>(begin, first); page < std::min<std::uintptr_t>(end, last); page += _page) pages[(page - begin) / _page] = Written | protection;
++            char* cursor = line;
++            const unsigned long long first = std::strtoull(cursor, &cursor, 16);
++            if (*cursor != '-') continue;
++            const unsigned long long last = std::strtoull(cursor + 1, &cursor, 16);
++            if (last <= lowest) continue;
++            if (first >= highest) break;
++            while (*cursor == ' ') ++cursor;
++            if (cursor[0] == '\0' || cursor[1] == '\0' || cursor[2] == '\0') continue;
++            const std::uint8_t protection = (cursor[0] == 'r' ? PROT_READ : 0) | (cursor[1] == 'w' ? PROT_WRITE : 0) | (cursor[2] == 'x' ? PROT_EXEC : 0);
++            while (first_query < queries.size() && queries[first_query].end <= first) ++first_query;
++            for (std::size_t q = first_query; q < queries.size() && queries[q].begin < last; ++q) {
++                auto& query = queries[q];
++                if (query.end <= first) continue;
++                for (auto page = std::max<std::uintptr_t>(query.begin, first); page < std::min<std::uintptr_t>(query.end, last); page += _page) (*query.pages)[(page - query.begin) / _page] = Written | protection;
++            }
+         }
+         std::fclose(maps);
+     }
+ 
++    void readProtections(std::uintptr_t begin, std::uintptr_t end, std::vector<std::uint8_t>& pages) const {
++        std::vector<ProtectionQuery> queries{{begin, end, &pages}};
++        readProtections(queries);
++    }
++
+     std::uintptr_t pageStart(std::uintptr_t address) const {
+         return address & ~(_page - 1);
+     }
+@@ -561,14 +588,26 @@ private:
+     void probe(std::uintptr_t begin, std::uintptr_t end) {
+         auto it = _ranges.upper_bound(begin);
+         if (it != _ranges.begin()) --it;
++        std::vector<decltype(it)> pending;
+         for (; it != _ranges.end() && it->first < end; ++it) {
+             if (it->second.probed || it->second.end <= begin) continue;
+             it->second.probed = true;
+-            std::vector<std::uint8_t> actual(it->second.pages.size(), 0);
+-            readProtections(it->first, it->second.end, actual);
+-            for (std::size_t i = 0; i < actual.size(); ++i) {
+-                auto& state = it->second.pages[i];
+-                if ((state & ProtectionMask) == 0 && (state & Protected) == 0) state = static_cast<std::uint8_t>(state | (actual[i] & ProtectionMask));
++            pending.push_back(it);
++        }
++        if (pending.empty()) return;
++        std::vector<std::vector<std::uint8_t>> actual(pending.size());
++        std::vector<ProtectionQuery> queries;
++        queries.reserve(pending.size());
++        for (std::size_t i = 0; i < pending.size(); ++i) {
++            actual[i].assign(pending[i]->second.pages.size(), 0);
++            queries.push_back({pending[i]->first, pending[i]->second.end, &actual[i]});
++        }
++        readProtections(queries);
++        for (std::size_t r = 0; r < pending.size(); ++r) {
++            auto& pages = pending[r]->second.pages;
++            for (std::size_t i = 0; i < actual[r].size(); ++i) {
++                auto& state = pages[i];
++                if ((state & ProtectionMask) == 0 && (state & Protected) == 0) state = static_cast<std::uint8_t>(state | (actual[r][i] & ProtectionMask));
+             }
+         }
+     }

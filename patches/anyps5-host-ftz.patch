@@ -1,0 +1,416 @@
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp b/core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp
+index c5f443c00..6a588f8e4 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp
+@@ -56,6 +56,7 @@
+ #include <thread>
+ #include <unordered_map>
+ #include <vector>
++#include <cstdio>
+ #include <utility>
+ 
+ namespace AgcDriver {
+@@ -839,6 +840,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
+         if ((state->subgroup.supportedOperations & VK_SUBGROUP_FEATURE_BALLOT_BIT) != 0) state->capabilities.push_back(spv::CapabilityGroupNonUniformBallot);
+         if ((state->subgroup.supportedOperations & VK_SUBGROUP_FEATURE_SHUFFLE_BIT) != 0) state->capabilities.push_back(spv::CapabilityGroupNonUniformShuffle);
+         if ((state->subgroup.supportedOperations & VK_SUBGROUP_FEATURE_ARITHMETIC_BIT) != 0) state->capabilities.push_back(spv::CapabilityGroupNonUniformArithmetic);
++        if ((state->subgroup.supportedOperations & VK_SUBGROUP_FEATURE_QUAD_BIT) != 0) state->capabilities.push_back(spv::CapabilityGroupNonUniformQuad);
+     }
+     APS5_LOG_OUT("Selected GPU name=%s vendor=0x%x device=0x%x subgroup=%u", state->properties.deviceName, state->properties.vendorID, state->properties.deviceID, state->subgroup.subgroupSize);
+     state->InstanceFunction<PFN_vkGetPhysicalDeviceMemoryProperties>("vkGetPhysicalDeviceMemoryProperties")(selected, &state->memoryProperties);
+@@ -2468,6 +2470,19 @@ bool VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
+     require(!residentConvert || (resident != nullptr && display != nullptr), "a converted resident presentation needs its image and display buffer");
+     require(uniform == nullptr || (pixels.empty() && display == nullptr && resident == nullptr), "a uniform presentation has no other source");
+     const bool direct = resident != nullptr && !residentConvert;
++    // APS5_PRESENT_CROP=WxH: the game draws its frame into the top-left WxH of a larger display
++    // buffer (Mewgenics with its screen and canvas patched to 1080p keeps 4K buffers): only that
++    // region is scaled to the window. Direct (resident image) presentations only.
++    static const std::pair<std::uint32_t, std::uint32_t> crop = [] {
++        const char* text = std::getenv("APS5_PRESENT_CROP");
++        unsigned w = 0, h = 0;
++        if (text == nullptr || std::sscanf(text, "%ux%u", &w, &h) != 2) return std::pair<std::uint32_t, std::uint32_t>{0u, 0u};
++        return std::pair<std::uint32_t, std::uint32_t>{w, h};
++    }();
++    if (direct && crop.first != 0 && crop.second != 0) {
++        width = std::min(width, crop.first);
++        height = std::min(height, crop.second);
++    }
+     // The scaler's source image, the color transfer's staging and the upload buffer are single
+     // objects an in-flight blit through them may still read: the paths using or re-creating them
+     // wait for every slot first. The game path did so before taking the mutex
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/src/ShaderValidation.cpp b/core/libs/prx/libSceAgcDriver/Graphics/src/ShaderValidation.cpp
+index 903746c24..8acb57e0a 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/src/ShaderValidation.cpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/src/ShaderValidation.cpp
+@@ -192,6 +192,7 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
+                     case spv::CapabilityGroupNonUniformBallot: subgroupOperations = VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_BALLOT_BIT; break;
+                     case spv::CapabilityGroupNonUniformShuffle: subgroupOperations = VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_SHUFFLE_BIT; break;
+                     case spv::CapabilityGroupNonUniformArithmetic: subgroupOperations = VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_ARITHMETIC_BIT; break;
++                    case spv::CapabilityGroupNonUniformQuad: subgroupOperations = VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_QUAD_BIT; break;
+                     default: break;
+                 }
+                 const bool isSubgroupCapability = subgroupOperations != 0;
+diff --git a/core/shader/recompiler/CacheKey.hpp b/core/shader/recompiler/CacheKey.hpp
+index be68766aa..fa9aa2fbf 100644
+--- a/core/shader/recompiler/CacheKey.hpp
++++ b/core/shader/recompiler/CacheKey.hpp
+@@ -89,6 +89,11 @@ private:
+         append(key, request.target);
+         append(key, DebugProbeActive());
+         append(key, RayTracingStrict());
++        append(key, HostDenormalFlush());
++        append(key, HostNanPropagation());
++        append(key, HostDppSources());
++        append(key, QuadDppMoves());
++        append(key, HostContraction());
+         append(key, RayTracingMiss());
+     }
+ 
+diff --git a/core/shader/recompiler/Recompiler.hpp b/core/shader/recompiler/Recompiler.hpp
+index e2ef5de83..d3a85f453 100644
+--- a/core/shader/recompiler/Recompiler.hpp
++++ b/core/shader/recompiler/Recompiler.hpp
+@@ -594,6 +594,16 @@ struct ResourceCapture;
+ void SetDebugProbeActive(bool active);
+ [[nodiscard]] bool DebugProbeActive();
+ [[nodiscard]] bool RayTracingStrict();
++// APS5_HOST_FTZ=1: f32 denormals are left to the host's flush instead of emulated per operand.
++[[nodiscard]] bool HostDenormalFlush();
++// APS5_HOST_NAN=1: f32 NaN results are the host's NaN instead of the guest's propagated payload.
++[[nodiscard]] bool HostNanPropagation();
++// APS5_HOST_DPP=1: DPP moves read inactive source lanes instead of keeping the old destination.
++[[nodiscard]] bool HostDppSources();
++// DPP quad_perm moves through the host's quad operations when it has them (APS5_NO_QUAD_DPP=1: off).
++[[nodiscard]] bool QuadDppMoves();
++// APS5_HOST_FMA=1: f32 add, subtract and multiply may be contracted by the host (no NoContraction).
++[[nodiscard]] bool HostContraction();
+ [[nodiscard]] bool RayTracingMiss();
+ 
+ struct RectListShaders {
+diff --git a/core/shader/recompiler/SpirvBackend/src/SpirvAlu/SpirvAluEmitterFloat64.cpp b/core/shader/recompiler/SpirvBackend/src/SpirvAlu/SpirvAluEmitterFloat64.cpp
+index 1fb812638..6e67dbfc5 100644
+--- a/core/shader/recompiler/SpirvBackend/src/SpirvAlu/SpirvAluEmitterFloat64.cpp
++++ b/core/shader/recompiler/SpirvBackend/src/SpirvAlu/SpirvAluEmitterFloat64.cpp
+@@ -1,4 +1,5 @@
+ #include "SpirvBackend/SpirvEmitterInstructions.hpp"
++#include "Recompiler.hpp"
+ #include <spirv/unified1/GLSL.std.450.h>
+ #include <spirv/unified1/spirv.hpp>
+ #include <array>
+@@ -258,7 +259,7 @@ std::uint32_t FlushDenormal32(SpirvEmitterState& state, std::uint32_t value, boo
+ std::uint32_t Interpolate(SpirvEmitterState& state, std::uint32_t delta, std::uint32_t coordinate, std::uint32_t base, bool halfResult, std::uint32_t mode) {
+     const auto u32 = TypeU32(state);
+     const bool quietNans = halfResult || (mode & InterpolationQuiet) != 0u;
+-    const bool flush32 = (mode & InterpolationFlush32) != 0u;
++    const bool flush32 = (mode & InterpolationFlush32) != 0u && !HostDenormalFlush();
+     const bool flush16 = (mode & InterpolationFlush16) != 0u;
+     delta = FlushDenormal32(state, delta, flush16, 0x38800000u);
+     coordinate = FlushDenormal32(state, coordinate, flush32, 0x00800000u);
+diff --git a/core/shader/recompiler/SpirvBackend/src/SpirvAlu/SpirvAluEmitterMath.cpp b/core/shader/recompiler/SpirvBackend/src/SpirvAlu/SpirvAluEmitterMath.cpp
+index 2e3525069..194d2bd7e 100644
+--- a/core/shader/recompiler/SpirvBackend/src/SpirvAlu/SpirvAluEmitterMath.cpp
++++ b/core/shader/recompiler/SpirvBackend/src/SpirvAlu/SpirvAluEmitterMath.cpp
+@@ -1,4 +1,5 @@
+ #include "SpirvBackend/SpirvEmitterInstructions.hpp"
++#include "Recompiler.hpp"
+ #include "SpirvBackend/SpirvMemory/SpirvSubgroup.hpp"
+ #include "IntermediateRepresentation/IrValue.hpp"
+ #include <spirv/unified1/GLSL.std.450.h>
+@@ -24,6 +25,12 @@ std::uint32_t Exact(SpirvEmitterState& state, std::uint32_t result) {
+     return result;
+ }
+ 
++// The guest's separately rounded f32 add, subtract and multiply; APS5_HOST_FMA=1 lets the host
++// contract a multiply and an add into one fused instruction (a mad on Adreno), rounding once.
++std::uint32_t Contractible(SpirvEmitterState& state, std::uint32_t result) {
++    return HostContraction() ? result : Exact(state, result);
++}
++
+ Pair ExtractPair(SpirvEmitterState& state, std::uint32_t value) {
+     Pair result{state.module.AllocateId(), state.module.AllocateId()};
+     state.module.AddFunction(spv::OpCompositeExtract, TypeU32(state), result.low, value, 0u);
+@@ -195,7 +202,9 @@ std::uint32_t EmitDppWriteCondition(SpirvValueEmitContext& ctx, const IrValue& i
+         const auto bounded = state.module.AllocateId();
+         state.module.AddFunction(spv::OpLogicalAnd, TypeBool(state), bounded, writable, target.valid);
+         writable = bounded;
+-        if (!flags.fetchInactive && (flags.control & DppMoveFlags::Lanes8) == 0u) {
++        // APS5_HOST_DPP=1: a lane reads its DPP source whether or not that lane is active (the
++        // value an inactive lane holds instead of the old destination): no ballot per move.
++        if (!flags.fetchInactive && (flags.control & DppMoveFlags::Lanes8) == 0u && !HostDppSources()) {
+             const auto sourceActive = EmitBallotLaneActiveBool(state, ctx.Ballot(inst.Argument(2)), target.lane);
+             writable = Binary(state, spv::OpLogicalAnd, TypeBool(state), writable, sourceActive);
+         }
+@@ -793,14 +802,56 @@ std::uint32_t EmitUndefU1(SpirvEmitterState& state, const IrValue& inst) {
+     return result;
+ }
+ 
++// A DPP quad_perm move through the host's quad operations: a quad of host invocations is a quad of
++// guest lanes (one lane per invocation, quads aligned), and Adreno runs these natively, where a
++// shuffle by a per-invocation index becomes a loop over the distinct indices. Zero when not
++// applicable. APS5_NO_QUAD_DPP=1 keeps the shuffle.
++std::uint32_t EmitQuadPermutation(SpirvValueEmitContext& ctx, const IrValue& inst, std::uint32_t control) {
++    auto& state = ctx.state;
++    const bool quad = std::find(state.supportedCapabilities.begin(), state.supportedCapabilities.end(), static_cast<std::uint32_t>(spv::CapabilityGroupNonUniformQuad)) != state.supportedCapabilities.end();
++    if (!QuadDppMoves() || !quad || ctx.otherHalf != nullptr || control > 0xffu) return 0u;
++    state.module.EmitCapability(spv::CapabilityGroupNonUniformQuad);
++    const auto value = ctx.Arg(inst, 0);
++    const auto u32 = TypeU32(state);
++    const auto scope = ConstantU32(state, spv::ScopeSubgroup);
++    const std::array<std::uint32_t, 4> perm{control & 3u, (control >> 2u) & 3u, (control >> 4u) & 3u, (control >> 6u) & 3u};
++    if (control == 0xe4u) return value;
++    const auto swap = [&](std::uint32_t direction) {
++        const auto result = state.module.AllocateId();
++        state.module.AddFunction(spv::OpGroupNonUniformQuadSwap, u32, result, scope, value, ConstantU32(state, direction));
++        return result;
++    };
++    if (control == 0xb1u) return swap(0u);
++    if (control == 0x4eu) return swap(1u);
++    if (control == 0x1bu) return swap(2u);
++    std::array<std::uint32_t, 4> broadcast{};
++    const auto from = [&](std::uint32_t lane) {
++        if (broadcast[lane] == 0u) {
++            broadcast[lane] = state.module.AllocateId();
++            state.module.AddFunction(spv::OpGroupNonUniformQuadBroadcast, u32, broadcast[lane], scope, value, ConstantU32(state, lane));
++        }
++        return broadcast[lane];
++    };
++    if (perm[0] == perm[1] && perm[1] == perm[2] && perm[2] == perm[3]) return from(perm[0]);
++    const auto position = EmitBinaryU32(state, spv::OpBitwiseAnd, EmitSubgroupLocalInvocationId(state), ConstantU32(state, 3u));
++    auto result = from(perm[3]);
++    for (std::uint32_t lane = 3u; lane-- > 0u;) {
++        if (perm[lane] == perm[3]) continue;
++        result = Select(state, u32, EmitCompareU32Constant(state, spv::OpIEqual, position, lane), from(perm[lane]), result);
++    }
++    return result;
++}
++
+ std::uint32_t EmitDppMoveU32(SpirvValueEmitContext& ctx, const IrValue& inst) {
+     auto& state = ctx.state;
+     const auto flags = inst.Flags<DppMoveFlags>();
+     const auto target = EmitDppTargetLane(state, flags.control);
+-    const auto shuffled = ctx.Shuffle(inst, 0, target.lane);
++    const auto permuted = (flags.control & DppMoveFlags::Lanes8) == 0u ? EmitQuadPermutation(ctx, inst, flags.control) : 0u;
++    const auto shuffled = permuted != 0u ? permuted : ctx.Shuffle(inst, 0, target.lane);
+     if (flags.fetchInactive) {
+         return EmitNative<spv::OpSelect, IrType::U32>(state, target.valid, shuffled, ConstantU32(state, 0u));
+     }
++    if (HostDppSources()) return EmitNative<spv::OpSelect, IrType::U32>(state, target.valid, shuffled, ConstantU32(state, 0u));
+     const auto ballot = ctx.Ballot(inst.Argument(1));
+     const auto sourceActive = EmitBallotLaneActiveBool(state, ballot, target.lane);
+     const auto canFetch = state.module.AllocateId();
+@@ -1166,15 +1217,15 @@ std::uint32_t EmitFPUnordGreaterThanEqual32(SpirvEmitterState& state, std::uint3
+ }
+ 
+ std::uint32_t EmitFPAdd32(SpirvEmitterState& state, std::uint32_t arg0, std::uint32_t arg1) {
+-    return Exact(state, EmitNative<spv::OpFAdd, IrType::F32>(state, arg0, arg1));
++    return Contractible(state, EmitNative<spv::OpFAdd, IrType::F32>(state, arg0, arg1));
+ }
+ 
+ std::uint32_t EmitFPSub32(SpirvEmitterState& state, std::uint32_t arg0, std::uint32_t arg1) {
+-    return Exact(state, EmitNative<spv::OpFSub, IrType::F32>(state, arg0, arg1));
++    return Contractible(state, EmitNative<spv::OpFSub, IrType::F32>(state, arg0, arg1));
+ }
+ 
+ std::uint32_t EmitFPMul32(SpirvEmitterState& state, std::uint32_t arg0, std::uint32_t arg1) {
+-    return Exact(state, EmitNative<spv::OpFMul, IrType::F32>(state, arg0, arg1));
++    return Contractible(state, EmitNative<spv::OpFMul, IrType::F32>(state, arg0, arg1));
+ }
+ 
+ std::uint32_t EmitAddU32(SpirvEmitterState& state, std::uint32_t arg0, std::uint32_t arg1) {
+@@ -1240,6 +1291,9 @@ static std::uint32_t EmitNativeF32ToF16BitsRte(SpirvEmitterState& state, std::ui
+     state.module.EmitCapability(spv::CapabilityFloat16);
+     state.module.EmitCapability(spv::CapabilityRoundingModeRTE);
+     state.module.EmitCapability(spv::CapabilityDenormPreserve);
++    // The module setup leaves these out for f32 under APS5_HOST_NAN; the f16 mode below needs them.
++    state.module.EmitCapability(spv::CapabilitySignedZeroInfNanPreserve);
++    state.module.EmitExtension("SPV_KHR_float_controls");
+     if (!state.nativeF16ModesEmitted) {
+         state.module.AddExecutionMode(state.mainFunc, spv::ExecutionModeRoundingModeRTE, 16u);
+         state.module.AddExecutionMode(state.mainFunc, spv::ExecutionModeDenormPreserve, 16u);
+diff --git a/core/shader/recompiler/SpirvBackend/src/SpirvMemory/SpirvModuleSetup.cpp b/core/shader/recompiler/SpirvBackend/src/SpirvMemory/SpirvModuleSetup.cpp
+index db279fdf5..bb62e4db7 100644
+--- a/core/shader/recompiler/SpirvBackend/src/SpirvMemory/SpirvModuleSetup.cpp
++++ b/core/shader/recompiler/SpirvBackend/src/SpirvMemory/SpirvModuleSetup.cpp
+@@ -1,4 +1,5 @@
+ #include "SpirvBackend/SpirvMemory/SpirvModuleSetup.hpp"
++#include "Recompiler.hpp"
+ #include "SpirvBackend/SpirvMemory/SpirvTypes.hpp"
+ #include "SpirvBackend/SpirvMemory/SpirvConstants.hpp"
+ #include "SpirvBackend/SpirvMemory/SpirvInputOutput.hpp"
+@@ -138,9 +139,13 @@ void DefineModule(SpirvEmitterState& state) {
+         state.module.EmitCapability(spv::CapabilityFragmentBarycentricKHR);
+         state.module.EmitExtension("SPV_KHR_fragment_shader_barycentric");
+     }
+-    state.module.EmitCapability(spv::CapabilitySignedZeroInfNanPreserve);
+-    state.module.EmitExtension("SPV_KHR_float_controls");
+-    state.module.AddExecutionMode(state.mainFunc, spv::ExecutionModeSignedZeroInfNanPreserve, 32u);
++    // APS5_HOST_NAN=1 leaves f32 signed zeros, infinities and NaNs to the host's optimizer.
++    const bool preserve32 = !HostNanPropagation();
++    if (preserve32 || state.requirements.float64) {
++        state.module.EmitCapability(spv::CapabilitySignedZeroInfNanPreserve);
++        state.module.EmitExtension("SPV_KHR_float_controls");
++    }
++    if (preserve32) state.module.AddExecutionMode(state.mainFunc, spv::ExecutionModeSignedZeroInfNanPreserve, 32u);
+     if (state.requirements.float64) {
+         if (std::find(state.supportedCapabilities.begin(), state.supportedCapabilities.end(), static_cast<std::uint32_t>(spv::CapabilityFloat64)) == state.supportedCapabilities.end()) {
+             throw std::runtime_error("64-bit float instructions need the Float64 capability, which the device lacks");
+diff --git a/core/shader/recompiler/SpirvBackend/src/SpirvModuleEmitter.cpp b/core/shader/recompiler/SpirvBackend/src/SpirvModuleEmitter.cpp
+index 8c968fb3f..69224030d 100644
+--- a/core/shader/recompiler/SpirvBackend/src/SpirvModuleEmitter.cpp
++++ b/core/shader/recompiler/SpirvBackend/src/SpirvModuleEmitter.cpp
+@@ -1,4 +1,5 @@
+ #include "SpirvBackend/SpirvModuleEmitter.hpp"
++#include "Recompiler.hpp"
+ #include "SpirvBackend/SpirvBufferFormat.hpp"
+ #include "SpirvBackend/SpirvEmitterHelpers.hpp"
+ #include "SpirvBackend/SpirvEmitterInstructions.hpp"
+@@ -881,6 +882,13 @@ std::uint32_t EmitClassMaskF32(SpirvEmitterState& state, std::uint32_t value, st
+ }
+ 
+ std::uint32_t EmitMinMaxF32Value(SpirvEmitterState& state, std::uint32_t lhs, std::uint32_t rhs, bool maxValue) {
++    // APS5_HOST_NAN=1: the host's NMin/NMax (the operand that is not a NaN, as the guest returns);
++    // the sign of an equal pair of zeros is the host's.
++    if (HostNanPropagation()) {
++        const auto result = state.module.AllocateId();
++        state.module.AddFunction(spv::OpExtInst, TypeF32(state), result, GlslStd450(state), maxValue ? GLSLstd450NMax : GLSLstd450NMin, lhs, rhs);
++        return result;
++    }
+     const auto lhsClass = EmitClassifyF32(state, lhs);
+     const auto rhsClass = EmitClassifyF32(state, rhs);
+ 
+@@ -896,6 +904,7 @@ std::uint32_t EmitMinMaxF32Value(SpirvEmitterState& state, std::uint32_t lhs, st
+ }
+ 
+ std::uint32_t EmitFlushF32DenormToSignedZero(SpirvEmitterState& state, std::uint32_t value) {
++    if (HostDenormalFlush()) return value;
+     const auto bits = state.module.AllocateId();
+     const auto absBits = state.module.AllocateId();
+     const auto signBits = state.module.AllocateId();
+diff --git a/core/shader/recompiler/Translation/src/DispatchInstructions.cpp b/core/shader/recompiler/Translation/src/DispatchInstructions.cpp
+index e2c9f9f7b..eae46f63c 100644
+--- a/core/shader/recompiler/Translation/src/DispatchInstructions.cpp
++++ b/core/shader/recompiler/Translation/src/DispatchInstructions.cpp
+@@ -85,6 +85,46 @@ bool DebugProbeActive() {
+     return g_debugProbeActive.load();
+ }
+ 
++bool HostContraction() {
++    static const bool host = [] {
++        const char* text = std::getenv("APS5_HOST_FMA");
++        return text != nullptr && std::strcmp(text, "1") == 0;
++    }();
++    return host;
++}
++
++bool QuadDppMoves() {
++    static const bool quad = [] {
++        const char* text = std::getenv("APS5_NO_QUAD_DPP");
++        return text == nullptr || text[0] == '\0' || std::strcmp(text, "0") == 0;
++    }();
++    return quad;
++}
++
++bool HostDppSources() {
++    static const bool host = [] {
++        const char* text = std::getenv("APS5_HOST_DPP");
++        return text != nullptr && std::strcmp(text, "1") == 0;
++    }();
++    return host;
++}
++
++bool HostNanPropagation() {
++    static const bool host = [] {
++        const char* text = std::getenv("APS5_HOST_NAN");
++        return text != nullptr && std::strcmp(text, "1") == 0;
++    }();
++    return host;
++}
++
++bool HostDenormalFlush() {
++    static const bool flush = [] {
++        const char* text = std::getenv("APS5_HOST_FTZ");
++        return text != nullptr && std::strcmp(text, "1") == 0;
++    }();
++    return flush;
++}
++
+ bool RayTracingStrict() {
+     static const bool strict = [] {
+         const char* text = std::getenv("APS5_RAYTRACING");
+diff --git a/core/shader/recompiler/Translation/src/FloatInstructions.cpp b/core/shader/recompiler/Translation/src/FloatInstructions.cpp
+index 3262eadda..b8a1ded4d 100644
+--- a/core/shader/recompiler/Translation/src/FloatInstructions.cpp
++++ b/core/shader/recompiler/Translation/src/FloatInstructions.cpp
+@@ -1,4 +1,5 @@
+ #include "Translation/FloatInstructions.hpp"
++#include "Recompiler.hpp"
+ #include "Translation/TranslationContext.hpp"
+ #include <array>
+ #include <cstdint>
+@@ -530,6 +531,14 @@ bool TranslationContext::vDivFixupF32(const RdnaInstruction& inst) {
+ }
+ 
+ bool TranslationContext::floatUnary(const RdnaInstruction& inst, IrOpcode opcode) {
++    // APS5_HOST_FTZ=1 with APS5_HOST_NAN=1: the host's reciprocal, square roots, log2 and exp2 give
++    // the guest's results for zeros, denormals (flushed), infinities and NaNs on their own.
++    const bool hostSpecials = opcode == IrOpcode::FPRecip32 || opcode == IrOpcode::FPRecipIFlag32 || opcode == IrOpcode::FPRecipSqrt32 || opcode == IrOpcode::FPSqrt || opcode == IrOpcode::FPLog2 || opcode == IrOpcode::FPExp2;
++    if (hostSpecials && HostDenormalFlush() && HostNanPropagation()) {
++        IrValue& argument = ir.BitCastF32(readU32(sourceAt(inst, 0u)).Value());
++        writeOperand(inst.destination, &ir.Emit(opcode, IrType::F32, {&argument}));
++        return true;
++    }
+     const IrU32 bits = flushF32Denormal(readU32(sourceAt(inst, 0u)));
+     const IrF32 argument(ir.BitCastF32(bits.Value()));
+     const auto [result, invalid] = unaryFloatSpecials(opcode, argument, IrF32(ir.Emit(opcode, IrType::F32, {&argument.Value()})));
+diff --git a/core/shader/recompiler/Translation/src/TranslationContext/OperandAccess.cpp b/core/shader/recompiler/Translation/src/TranslationContext/OperandAccess.cpp
+index 27b6e20f8..60a57a801 100644
+--- a/core/shader/recompiler/Translation/src/TranslationContext/OperandAccess.cpp
++++ b/core/shader/recompiler/Translation/src/TranslationContext/OperandAccess.cpp
+@@ -1,5 +1,6 @@
+ #include "RdnaDecoder/RdnaInstructionDecoder.hpp"
+ #include "Translation/TranslationContext.hpp"
++#include "Recompiler.hpp"
+ #include <algorithm>
+ #include <array>
+ #include <stdexcept>
+@@ -342,6 +343,9 @@ IrU32 TranslationContext::quietNan32(IrU32 bits) {
+ }
+ 
+ IrValue* TranslationContext::nanResultF32(std::initializer_list<IrValue*> sources, IrValue* result, IrValue* invalidProduct) {
++    // APS5_HOST_NAN=1: a NaN result keeps the host's NaN instead of the guest's quieted source or
++    // default NaN (only the payload bits differ; every NaN stays a NaN).
++    if (HostNanPropagation()) return result;
+     const auto isNan = [&](IrValue& bits) -> IrValue& { return ir.UGreaterThan(ir.BitwiseAnd(bits, ir.Constant(0x7fffffffu)), ir.Constant(0x7f800000u)); };
+     IrValue* bits = &ir.BitCastU32(*result);
+     bits = &ir.Select(isNan(*bits), ir.Constant(0xffc00000u), *bits);
+@@ -382,7 +386,7 @@ IrF32 TranslationContext::applyF32ResultModifiers(const RdnaOperand& operand, Ir
+             const std::uint32_t exponentStep = operand.omod == 1u ? 0x00800000u : 0x01000000u;
+             result = &ir.Select(ir.ULessThan(magnitude, ir.Constant(0x7f800000u - exponentStep)), ir.IAdd(bits, ir.Constant(exponentStep)), ir.BitwiseOr(sign, ir.Constant(0x7f800000u)));
+         }
+-        result = &ir.Select(ir.ULessThan(magnitude, ir.Constant(0x00800000u)), ir.Constant(0u), *result);
++        if (!HostDenormalFlush()) result = &ir.Select(ir.ULessThan(magnitude, ir.Constant(0x00800000u)), ir.Constant(0u), *result);
+         result = &ir.Select(ir.UGreaterThan(magnitude, ir.Constant(0x7f7fffffu)), bits, *result);
+         value = IrF32(ir.BitCastF32(*result));
+     }
+diff --git a/core/shader/recompiler/Translation/src/VectorInstructions.cpp b/core/shader/recompiler/Translation/src/VectorInstructions.cpp
+index 645b98534..abc1cb187 100644
+--- a/core/shader/recompiler/Translation/src/VectorInstructions.cpp
++++ b/core/shader/recompiler/Translation/src/VectorInstructions.cpp
+@@ -1,5 +1,6 @@
+ #include "Translation/VectorInstructions.hpp"
+ #include "Translation/TranslationContext.hpp"
++#include "Recompiler.hpp"
+ #include <stdexcept>
+ 
+ namespace ShaderRecompiler {
+@@ -24,6 +25,10 @@ bool roundsProductSeparately(const RdnaInstruction& inst) {
+ }
+ 
+ std::uint32_t TranslationContext::f32DenormalFlushFor(const RdnaInstruction& inst) const {
++    // APS5_HOST_FTZ=1: the host flushes f32 denormals itself (Adreno does in hardware), so the
++    // per-operand flush and the tiny-product checks are left out; denormal inputs and results may
++    // then differ from the guest in the last bits, which no graphics shader is expected to notice.
++    if (HostDenormalFlush()) return 0u;
+     std::uint32_t flush = 0u;
+     switch (inst.op) {
+     case RdnaOpcode::VAddF32:

@@ -1,0 +1,108 @@
+--- a/core/libs/prx/aps5native/WriteWatchNative.cpp	2026-10-24 08:00:04.377934178 +0500
++++ b/core/libs/prx/aps5native/WriteWatchNative.cpp	2026-10-24 08:00:04.389934178 +0500
+@@ -74,7 +74,7 @@
+         });
+         erase(begin, end);
+         _ranges.emplace(begin, Range{end, std::move(pages)});
+-        publish();
++        publish(begin, end, true);
+         traceRange("register", begin, end, true);
+     }
+ 
+@@ -107,7 +107,7 @@
+         if (!_available || end <= begin) return false;
+         const GuardedLock lock(_lock);
+         const bool removed = erase(begin, end);
+-        if (removed) publish();
++        if (removed) publish(begin, end, false);
+         traceRange("unregister", begin, end, removed);
+         return removed;
+     }
+@@ -592,7 +592,22 @@
+         return (address + _page - 1) & ~(_page - 1);
+     }
+ 
+-    // Страницам с неизвестными (нулевыми) правами — реальные права из /proc/self/maps, один раз на диапазон.
++    // box64 (ANDROID-сборка) отдаёт права страниц из своей карты отображений: /proc/self/maps под box64
++    // огромен, и его разбор на каждый новый импорт стоил ~7% потока игры в хабе Mewgenics.
++    // APS5_NO_BOX64_PROTECTIONS=1 — всегда /proc/self/maps.
++    using Box64Protections = void (*)(std::uintptr_t begin, std::size_t pages, std::size_t page, std::uint8_t* out);
++    static Box64Protections box64Protections() {
++        static const Box64Protections function = []() -> Box64Protections {
++            if (std::getenv("APS5_NO_BOX64_PROTECTIONS") != nullptr) return nullptr;
++            void* box64 = dlopen("libbox64.so", RTLD_NOW | RTLD_NOLOAD);
++            auto* found = reinterpret_cast<Box64Protections>(box64 != nullptr ? dlsym(box64, "box64_aps5_page_protections") : dlsym(RTLD_DEFAULT, "box64_aps5_page_protections"));
++            std::fprintf(stderr, "[write-watch] page protections: %s\n", found != nullptr ? "box64 map" : "/proc/self/maps");
++            return found;
++        }();
++        return function;
++    }
++
++    // Страницам с неизвестными (нулевыми) правами — реальные права (box64 или /proc/self/maps), один раз на диапазон.
+     void probe(std::uintptr_t begin, std::uintptr_t end) {
+         auto it = _ranges.upper_bound(begin);
+         if (it != _ranges.begin()) --it;
+@@ -606,8 +621,14 @@
+         std::vector<std::vector<std::uint8_t>> actual(pending.size());
+         std::vector<ProtectionQuery> queries;
+         queries.reserve(pending.size());
++        const auto fromBox64 = box64Protections();
+         for (std::size_t i = 0; i < pending.size(); ++i) {
+             actual[i].assign(pending[i]->second.pages.size(), 0);
++            // Права из карты box64; страницы, которых она не знает, — из /proc/self/maps.
++            if (fromBox64 != nullptr) {
++                fromBox64(pending[i]->first, actual[i].size(), _page, actual[i].data());
++                if (std::find(actual[i].begin(), actual[i].end(), 0) == actual[i].end()) continue;
++            }
+             queries.push_back({pending[i]->first, pending[i]->second.end, &actual[i]});
+         }
+         readProtections(queries);
+@@ -620,7 +641,48 @@
+         }
+     }
+ 
++    using Coverage = std::vector<std::pair<std::uintptr_t, std::uintptr_t>>;
++
++    // Покрытие после добавления (added) или вырезания [begin, end): erase() вырезает ровно этот
++    // интервал, так что новое покрытие — старое плюс или минус он. Копия вектора вместо обхода всех
++    // диапазонов (publish на каждую регистрацию стоил ~6% потока игры в хабе Mewgenics).
++    static Coverage editCoverage(const Coverage& old, std::uintptr_t begin, std::uintptr_t end, bool added) {
++        Coverage result;
++        result.reserve(old.size() + 1);
++        auto it = std::lower_bound(old.begin(), old.end(), begin, [](const auto& interval, std::uintptr_t value) { return interval.second < value; });
++        result.insert(result.end(), old.begin(), it);
++        if (added) {
++            auto merged = std::make_pair(begin, end);
++            for (; it != old.end() && it->first <= end; ++it) {
++                merged.first = std::min(merged.first, it->first);
++                merged.second = std::max(merged.second, it->second);
++            }
++            result.push_back(merged);
++        } else {
++            for (; it != old.end() && it->first < end; ++it) {
++                if (it->second <= begin) {
++                    result.push_back(*it);
++                    continue;
++                }
++                if (it->first < begin) result.emplace_back(it->first, begin);
++                if (end < it->second) result.emplace_back(end, it->second);
++            }
++        }
++        result.insert(result.end(), it, old.end());
++        return result;
++    }
++
+     // Снимок покрытых интервалов (соседние слиты) для Covers; вызывается под _lock.
++    void publish(std::uintptr_t begin, std::uintptr_t end, bool added) {
++        static const bool full = std::getenv("APS5_WATCH_FULL_PUBLISH") != nullptr;
++        const auto old = std::atomic_load(&_coverage);
++        if (full || old == nullptr) {
++            publish();
++            return;
++        }
++        std::atomic_store(&_coverage, std::shared_ptr<const Coverage>(std::make_shared<Coverage>(editCoverage(*old, begin, end, added))));
++    }
++
+     void publish() {
+         auto coverage = std::make_shared<std::vector<std::pair<std::uintptr_t, std::uintptr_t>>>();
+         for (const auto& [begin, range] : _ranges) {

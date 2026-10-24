@@ -1,0 +1,192 @@
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp b/core/libs/prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp
+index dc28921f8..02d308d90 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp
+@@ -148,6 +148,16 @@ private:
+     static void dumpPackets(std::span<const std::uint32_t> commands, const std::uint32_t* guest = nullptr);
+     static void validate(const Submission& submission, const std::uint32_t* guest = nullptr);
+     static void reportSkip(const char* kind, const std::string& what);
++    // APS5_SKIP_FAILED_SHADERS=1: a draw or dispatch the recompiler or the device refuses is left out (reported once
++    // per reason through reportSkip) instead of ending the title, as upstream AnyPS5 poisons such work.
++    static bool skipFailedShaders();
++    // Work refused once is left out again without being attempted: on Android every thrown exception walks the
++    // unwind tables of all loaded libraries, and a refused draw repeated each frame made that the hottest code of
++    // the queue worker. The key is the draw register key or the dispatch key; every 256th repeat is tried again.
++    static bool skipRefused(std::uint64_t key);
++    static void noteRefused(std::uint64_t key);
++    static void forgetRefused(std::uint64_t key);
++    static std::uint64_t& attemptedDrawKey();
+     static bool matchesFillKernel(std::span<const std::uint32_t> code, const std::vector<std::uint32_t>& userData, const ShaderRecompiler::ShaderComputeStageInfo& compute);
+     static bool fillClearEnabled();
+     static bool fillClearExactOnly();
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Dispatch/Dispatch.cpp b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Dispatch/Dispatch.cpp
+index cc300de66..093a747e7 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Dispatch/Dispatch.cpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Dispatch/Dispatch.cpp
+@@ -155,6 +155,9 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet,
+             mix(value);
+         }
+     }
++    // Dispatch keys and draw keys share the refusal memo; the salt keeps them apart.
++    const auto refusalKey = key ^ 0x9e3779b97f4a7c15ull;
++    if (skipFailedShaders() && skipRefused(refusalKey)) return;
+     std::shared_ptr<const ShaderRecompiler::RecompileResult> compiledResult;
+ 
+     std::shared_ptr<DispatchVariant> keepVariant;
+@@ -275,6 +278,11 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet,
+             char where[96];
+             if (dump.empty()) std::snprintf(where, sizeof(where), "compute shader 0x%llx: ", static_cast<unsigned long long>(address));
+             else std::snprintf(where, sizeof(where), "compute shader 0x%llx (%s): ", static_cast<unsigned long long>(address), dump.c_str());
++            if (skipFailedShaders()) {
++                reportSkip("dispatch", where + reason);
++                noteRefused(refusalKey);
++                return;
++            }
+             throw std::runtime_error(where + reason);
+         }
+         recompileMs += phaseTiming.Elapsed();
+@@ -345,6 +353,11 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet,
+         }
+         char where[64];
+         std::snprintf(where, sizeof(where), "compute shader 0x%llx: ", static_cast<unsigned long long>(address));
++        if (skipFailedShaders()) {
++            reportSkip("dispatch", where + std::string(error.what()));
++            noteRefused(refusalKey);
++            return true;
++        }
+         throw std::runtime_error(where + std::string(error.what()));
+     };
+     phaseTiming.Phase(PhaseSnapshots);
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/Draw.cpp b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/Draw.cpp
+index 1ecf9ca27..8afc5ecdb 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/Draw.cpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/Draw.cpp
+@@ -254,6 +254,10 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
+             ++drawEntryCounters.absent;
+         }
+     }
++    if (skipFailedShaders()) {
++        attemptedDrawKey() = drawKey;
++        if (skipRefused(drawKey)) return DrawVerdict::Nothing;
++    }
+     if (decode != nullptr && !DecodeProgramsCurrent(*decode, *submission.shaders)) {
+         std::lock_guard cacheLock(drawCacheMutex);
+         eraseDrawEntry(drawKey, entry);
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Packets/PacketExecution.cpp b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Packets/PacketExecution.cpp
+index c04120360..b971e270f 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Packets/PacketExecution.cpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Packets/PacketExecution.cpp
+@@ -283,8 +283,10 @@ void Driver::execute(const Submission& submission) {
+ 
+                 try {
+                     std::string rejected;
++                    attemptedDrawKey() = 0;
+                     const auto verdict = draw(queue, packet, submission, rejected);
+                     drawn = verdict == DrawVerdict::Drawn;
++                    if (drawn && skipFailedShaders()) forgetRefused(attemptedDrawKey());
+                     CaptureTrace::Log("draw submission=%llu queue=%x offset=%zu target=%llx mask=%x verdict=%d reason=%.256s", static_cast<unsigned long long>(submission.serial), submission.queue, cursor, static_cast<unsigned long long>(color), readRegister(queue.context, 0x8e), static_cast<int>(verdict), rejected.c_str());
+                     if (verdict == DrawVerdict::Rejected) {
+                         countSkip(Graphics::DrawSkip::Prechecked);
+@@ -297,7 +299,9 @@ void Driver::execute(const Submission& submission) {
+                 } catch (const std::exception& error) {
+                     CaptureTrace::Log("draw-error submission=%llu offset=%zu reason=%.256s", static_cast<unsigned long long>(submission.serial), cursor, error.what());
+                     countSkip(Graphics::DrawSkip::Thrown);
+-                    throw;
++                    if (!skipFailedShaders()) throw;
++                    reportSkip("draw", error.what());
++                    noteRefused(attemptedDrawKey());
+                 }
+             });
+             finishDrawPacket(drawn);
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Shaders/ShaderDiagnostics.cpp b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Shaders/ShaderDiagnostics.cpp
+index 5fac82751..bf6fbda25 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Shaders/ShaderDiagnostics.cpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Shaders/ShaderDiagnostics.cpp
+@@ -1,11 +1,75 @@
+ #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
+ #include "ControlFlow/RequestSerializer.hpp"
++#include <atomic>
++#include <chrono>
++#include <cstdio>
+ #include <cstdlib>
++#include <mutex>
++#include <unordered_map>
+ #include <functional>
+ #include <string_view>
+ 
+ namespace AgcDriver::DriverDetail {
+ 
++bool Driver::skipFailedShaders() {
++    static const bool skip = [] { const char* text = std::getenv("APS5_SKIP_FAILED_SHADERS"); return text != nullptr && text[0] != '\0' && text[0] != '0'; }();
++    return skip;
++}
++
++namespace {
++std::mutex refusedMutex;
++std::unordered_map<std::uint64_t, std::uint32_t> refused;
++std::atomic<bool> anyRefused{false};
++// Every ~10 s with any activity, one line in the log: how much refused work was left out by the memo, how much
++// was refused anew and how many repeats were attempted again (the memo works when "left out" dominates).
++std::uint64_t leftOut = 0, refusedAnew = 0, retried = 0;
++std::chrono::steady_clock::time_point refusalReportAt{};
++
++void reportRefusals() {
++    const auto now = std::chrono::steady_clock::now();
++    if (refusalReportAt == std::chrono::steady_clock::time_point{}) refusalReportAt = now;
++    if (now - refusalReportAt < std::chrono::seconds(10)) return;
++    if (leftOut + refusedAnew + retried != 0) {
++        std::fprintf(stderr, "[gpu] refused work in %.0f s: %llu left out by the memo, %llu refused anew, %llu tried again; %zu keys\n",
++            std::chrono::duration<double>(now - refusalReportAt).count(), static_cast<unsigned long long>(leftOut), static_cast<unsigned long long>(refusedAnew), static_cast<unsigned long long>(retried), refused.size());
++    }
++    leftOut = refusedAnew = retried = 0;
++    refusalReportAt = now;
++}
++}
++
++bool Driver::skipRefused(std::uint64_t key) {
++    if (key == 0 || !anyRefused.load(std::memory_order_relaxed)) return false;
++    std::lock_guard lock(refusedMutex);
++    const auto found = refused.find(key);
++    if (found == refused.end()) return false;
++    const bool skip = ++found->second % 256u != 0u;
++    ++(skip ? leftOut : retried);
++    reportRefusals();
++    return skip;
++}
++
++void Driver::noteRefused(std::uint64_t key) {
++    if (key == 0) return;
++    std::lock_guard lock(refusedMutex);
++    if (refused.size() >= 4096) refused.clear();
++    refused.try_emplace(key, 0u);
++    ++refusedAnew;
++    reportRefusals();
++    anyRefused.store(true, std::memory_order_relaxed);
++}
++
++void Driver::forgetRefused(std::uint64_t key) {
++    if (key == 0 || !anyRefused.load(std::memory_order_relaxed)) return;
++    std::lock_guard lock(refusedMutex);
++    refused.erase(key);
++}
++
++std::uint64_t& Driver::attemptedDrawKey() {
++    thread_local std::uint64_t key = 0;
++    return key;
++}
++
+ void Driver::reportSkip(const char* kind, const std::string& what) {
+     static std::mutex reportedMutex;
+     static std::set<std::size_t> reported;
+diff --git a/docs/dev/TechnicalDebt.md b/docs/dev/TechnicalDebt.md
+index 7eefcac39..1b69c7a30 100644
+--- a/docs/dev/TechnicalDebt.md
++++ b/docs/dev/TechnicalDebt.md
+@@ -40,6 +40,7 @@ Throughout the project, every function at every stage either **does exactly what
+ - [libSceNpTrophy2](../../core/libs/prx/libSceNpTrophy2/src/GameInfo.cpp): `sceNpTrophy2RegisterUnlockCallback` accepts a callback that is never called, as no trophy is ever unlocked, and `sceNpTrophy2UnregisterUnlockCallback` only returns success.
+ - [sceAvPlayerSetTrickSpeed](../../core/libs/prx/libSceAvPlayer/src/Source.cpp) (libSceAvPlayer) with a negative speed runs the clock backwards but delivers no frames; when a forward speed is set again, playback resumes from the rewound time.
+ - [sceMouseSetAbsoluteVirtualScreenSize, sceMouseResetAbsolutePosition, sceMouseSetAbsoluteHighPrecisionMode, sceMouseReadAbsolutePosition](../../core/libs/prx/libSceMouse/Export.cpp) (libSceMouse) - the PS5 absolute-position mode; shadPS4 has no counterpart. The handle is the first parameter like the rest of the library and is checked like `sceMouseRead`. PPSA37318 calls `sceMouseSetAbsoluteVirtualScreenSize(handle, 3)`, `sceMouseSetAbsoluteHighPrecisionMode(handle, 1)` and, after every read, `sceMouseResetAbsolutePosition(handle, 1920, 1080)` (16-bit coordinates), taking the motion as the distance from that centre; the size index is therefore taken as 0..3 = 720p, 1080p, 1440p, 2160p (only 3 is seen, the others are guesses) and 3840x2160 is the default. The host's relative motion (in 1920x1080 units) moves a cursor over that screen; `sceMouseReadAbsolutePosition(handle, data, num)` writes the current state as one 40-byte sample and returns 1: the MouseData header (timestamp, connected, buttons), 16-bit `x, y` at offset 16, then the wheel and tilt since the last read, the fields PPSA37318 reads (offsets 8, 12, 16, 18, 20). High-precision mode is accepted and ignored. The real signatures, the size table, the remaining fields and the errors are unverified on a console
++- [APS5_SKIP_FAILED_SHADERS](../../core/libs/prx/libSceAgcDriver/Execution/src/Driver/Shaders/ShaderDiagnostics.cpp) (libSceAgcDriver) - with the variable set, a draw or a dispatch whose shader the recompiler or the device refuses (an unsupported image access such as a 1D address on a 2D-array T#, PPSA37318) is left out and reported once per reason, as upstream AnyPS5 poisons such work, instead of ending the title. Work refused once (same draw register key or dispatch key) is left out again without being attempted, and tried again every 256th time: a refused draw repeated each frame otherwise threw each time, and on Android the unwinding (dl_iterate_phdr over every loaded library) became the hottest code of the queue worker. What the left-out work would have written is missing; the Android port sets it by default
+ - [sceRudpActivate](../../core/libs/prx/libSceRudp/Export.cpp) (libSceRudp) - there is no reliable-UDP stack on the host to activate, so it returns success without doing anything, as [shadPS4](https://github.com/shadps4-emu/shadPS4/blob/main/src/core/libraries/rudp/rudp.cpp) does for its own `sceRudpActivate`. PPSA01325 calls it with no arguments during start-up; what the console activates, and whether it reports an error before `sceRudpInit`, is unverified
+ - [ulobjmgr](../../core/libs/prx/ulobjmgr/Export.cpp) registers no object: `_sceUlobjmgrRegisterObject` always hands out id 0 and `_sceUlobjmgrUnregisterObject` releases nothing, as shadPS4 does
+ - [libSceHttp](../../core/libs/prx/libSceHttp/Export.cpp) - no request reaches the network, so `sceHttpSetResponseHeaderMaxSize` has no response header to limit, `sceHttpSetRecvBlockSize` (`(int id, u32 blockSize)` as in [shadPS4](https://github.com/shadps4-emu/shadPS4/blob/main/src/core/libraries/network/http.h)) no response body to read in blocks and `sceHttpRedirectCacheFlush` no redirect to forget; `sceHttpsUnloadCert` returns success like `sceHttpsLoadCert`, which keeps no certificate; `sceHttpSetRedirectCallback` and `sceHttpSetCookieRecvCallback` accept callbacks that are never called, `sceHttpsSetSslVersion` has no TLS connection to configure and `sceHttpsGetSslError` reports error 0 with detail 0; `sceHttpSetAuthInfoCallback` accepts a callback that is never called, as no server asks for authentication

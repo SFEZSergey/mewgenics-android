@@ -1,0 +1,65 @@
+diff --git a/core/libs/prx/libSceMouse/src/mouse_impl.cpp b/core/libs/prx/libSceMouse/src/mouse_impl.cpp
+index 8bcb0c4..186bf4b 100644
+--- a/core/libs/prx/libSceMouse/src/mouse_impl.cpp
++++ b/core/libs/prx/libSceMouse/src/mouse_impl.cpp
+@@ -30,6 +30,9 @@ double absoluteY = 1080.0;
+ std::int32_t screenWidth = 3840;
+ std::int32_t screenHeight = 2160;
+ std::int32_t absoluteWheel = 0;
++// Buttons pressed since the last absolute read: a touch tap presses and releases between two reads
++// of the game, which sees only the current state; the press is reported by the next read anyway.
++std::uint32_t pressedSinceRead = 0;
+ std::int32_t absoluteTilt = 0;
+ 
+ void clampAbsolute() {
+@@ -64,7 +67,7 @@ int Open(int userId, std::int32_t type, std::int32_t index, const MouseOpenParam
+     }
+     if (opened) return MOUSE_ERROR_ALREADY_OPENED;
+     opened = true;
+-    buttons = 0;
++    buttons = pressedSinceRead = 0;
+     head = 0;
+     count = 0;
+     MouseData initial{};
+@@ -79,7 +82,7 @@ int Close(std::int32_t handle) {
+     if (!initialized) return MOUSE_ERROR_NOT_INITIALIZED;
+     if (handle != MOUSE_HANDLE || !opened) return MOUSE_ERROR_INVALID_HANDLE;
+     opened = false;
+-    buttons = 0;
++    buttons = pressedSinceRead = 0;
+     head = 0;
+     count = 0;
+     return MOUSE_OK;
+@@ -143,7 +146,7 @@ int ReadAbsolute(std::int32_t handle, MouseAbsoluteData* data, std::int32_t num)
+     MouseAbsoluteData sample{};
+     sample.timestamp = sceKernelGetProcessTime();
+     sample.connected = connected ? 1u : 0u;
+-    sample.buttons = connected ? buttons : 0u;
++    sample.buttons = connected ? (buttons | std::exchange(pressedSinceRead, 0u)) : 0u;
+     sample.x = static_cast<std::uint16_t>(absoluteX);
+     sample.y = static_cast<std::uint16_t>(absoluteY);
+     sample.wheel = std::exchange(absoluteWheel, 0);
+@@ -157,7 +160,7 @@ void Publish(const MouseInputEvent& event) {
+     if (event.connectionChange) {
+         if (connected == event.connected) return;
+         connected = event.connected;
+-        if (!connected) buttons = 0;
++        if (!connected) buttons = pressedSinceRead = 0;
+     } else if (!connected) {
+         return;
+     }
+@@ -167,9 +170,12 @@ void Publish(const MouseInputEvent& event) {
+     clampAbsolute();
+     absoluteWheel += event.wheel;
+     absoluteTilt += event.tilt;
+-    if (event.resetButtons) buttons = 0;
++    if (event.resetButtons) buttons = pressedSinceRead = 0;
+     if (event.button != 0) {
+-        if (event.pressed) buttons |= event.button;
++        if (event.pressed) {
++            buttons |= event.button;
++            pressedSinceRead |= event.button;
++        }
+         else buttons &= ~event.button;
+     }
+     MouseData data{};

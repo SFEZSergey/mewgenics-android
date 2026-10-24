@@ -1,0 +1,23 @@
+diff --git a/core/shader/recompiler/Optimization/src/ResourceMaterializer.cpp b/core/shader/recompiler/Optimization/src/ResourceMaterializer.cpp
+index e38ac7d8e..9325f6282 100644
+--- a/core/shader/recompiler/Optimization/src/ResourceMaterializer.cpp
++++ b/core/shader/recompiler/Optimization/src/ResourceMaterializer.cpp
+@@ -633,6 +633,18 @@ std::vector<ImageResource> ResourceMaterializer::RuntimeImageModes(const ImageRe
+             volume.dimension = RdnaImageDimension::Dim3D;
+             modes.push_back(volume);
+         }
++        // A 1D image_load or image_store on a 2D or 2D-array T# (PPSA37318 reads a 9100x1 2D-array line with a 1D
++        // address in dozens of draws per frame): the row and the slice are zero, which CoordU32 already supplies
++        // for the components the address does not carry.
++        const bool lineLoad = image.dimension == RdnaImageDimension::Dim1D && image.fmaskCompatible;
++        const bool lineStore = image.dimension == RdnaImageDimension::Dim1D && storage && image.written && !image.read && !image.atomic && image.mipMode != ImageMipMode::DynamicStorage;
++        if ((lineLoad || lineStore) && !depth && packed == IrBufferFormat::Invalid && image.byElements == 0u) {
++            for (const auto dimension : {RdnaImageDimension::Dim2D, RdnaImageDimension::Dim2DArray}) {
++                auto plane = mode;
++                plane.dimension = dimension;
++                modes.push_back(plane);
++            }
++        }
+         if (image.dimension == RdnaImageDimension::Dim3D && image.flatVolumeCompatible && !storage && !depth && conversion == IrBufferFormat::Invalid && packed == IrBufferFormat::Invalid) {
+             for (const auto dimension : {RdnaImageDimension::Dim2D, RdnaImageDimension::Dim2DArray}) {
+                 auto plane = mode;

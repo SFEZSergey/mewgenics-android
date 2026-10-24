@@ -1,0 +1,55 @@
+diff -ru a/core/libs/prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp b/core/libs/prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp
+--- a/core/libs/prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp	2026-10-24 13:07:18.837749857 +0500
++++ b/core/libs/prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp	2026-10-24 13:07:18.845749857 +0500
+@@ -15,7 +15,10 @@
+ VkImageView DepthSurfaceView(const Context& context, const DepthTarget& target);
+ std::uint64_t DepthSliceBytes(VkExtent2D extent, std::uint32_t bytesPerTexel);
+ void ClearDepthSurfaces(VkDevice device);
+-bool DepthSurfaceAt(std::uint64_t address);
++// A depth or stencil plane of a depth surface at this address with this extent. The extent matters:
++// guest memory of a released depth target is reused for other surfaces (a title's blur chain of small
++// storage images), and those must not be taken for the depth plane.
++bool DepthSurfaceAt(std::uint64_t address, std::uint32_t width, std::uint32_t height);
+ std::uint64_t HtileDepthClearAddress(std::span<const std::uint32_t> code, std::span<const std::uint32_t> userData, const std::array<std::uint32_t, 3>& numThreads);
+ void NoteHtileDepthClear(std::uint64_t htileAddress);
+ // A buffer fill that covers a whole depth or stencil plane of a depth surface (titles clear them
+diff -ru a/core/libs/prx/libSceAgcDriver/Graphics/src/DepthSurface.cpp b/core/libs/prx/libSceAgcDriver/Graphics/src/DepthSurface.cpp
+--- a/core/libs/prx/libSceAgcDriver/Graphics/src/DepthSurface.cpp	2026-10-24 13:07:18.885749857 +0500
++++ b/core/libs/prx/libSceAgcDriver/Graphics/src/DepthSurface.cpp	2026-10-24 13:07:18.893749857 +0500
+@@ -261,9 +261,13 @@
+     return found != list.rend() && (*found)->Holds(texture);
+ }
+ 
+-bool DepthSurfaceAt(std::uint64_t address) {
++bool DepthSurfaceAt(std::uint64_t address, std::uint32_t width, std::uint32_t height) {
++    static const bool anyExtent = std::getenv("APS5_DEPTH_AT_ANY_EXTENT") != nullptr;
+     std::lock_guard lock(surfacesMutex());
+-    return std::any_of(surfaces().begin(), surfaces().end(), [&](const auto& surface) { return surface->target.address == address || surface->target.stencilAddress == address; });
++    return std::any_of(surfaces().begin(), surfaces().end(), [&](const auto& surface) {
++        const auto& target = surface->target;
++        return (target.address == address || (target.stencilAddress != 0 && target.stencilAddress == address)) && (anyExtent || (target.extent.width == width && target.extent.height == height));
++    });
+ }
+ 
+ }
+diff -ru a/core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp b/core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp
+--- a/core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp	2026-10-24 13:07:18.933749857 +0500
++++ b/core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp	2026-10-24 13:07:18.945749857 +0500
+@@ -833,7 +833,7 @@
+ 
+ // `guestBytes` is the surface size when the caller described the surface already (0: described here).
+ std::shared_ptr<StorageTexture> cachedStorageTexture(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& viewed, std::uint32_t mip, std::uint64_t guestBytes) {
+-    if (DepthSurfaceAt(viewed.baseAddress)) {
++    if (DepthSurfaceAt(viewed.baseAddress, viewed.width, viewed.height)) {
+         char text[112];
+         std::snprintf(text, sizeof(text), "AGC graphics: storage image access to depth/stencil surface 0x%llx is not implemented", static_cast<unsigned long long>(viewed.baseAddress));
+         throw std::runtime_error(text);
+@@ -3161,7 +3161,7 @@
+     // between the stages marks them uncompressed).
+     const auto address = record.resource.baseAddress;
+     const auto bytes = static_cast<std::size_t>(record.guestBytes);
+-    if (DepthSurfaceAt(address)) return nullptr;
++    if (DepthSurfaceAt(address, record.resource.width, record.resource.height)) return nullptr;
+     if (GuestMemory::CollectWrites(address, bytes) == 0) return nullptr;
+     if (PendingStorageOverlaps(address, bytes, record.source.get())) return nullptr;
+     auto keys = record.keys;

@@ -1,0 +1,226 @@
+#include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
+#include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include <algorithm>
+#include <cstdlib>
+#include <unordered_map>
+
+namespace AgcDriver::DriverDetail {
+
+namespace {
+
+std::uint32_t ReadGraphicsRegister(const Registers& registers, std::uint32_t offset) {
+    const auto found = registers.find(offset);
+    return found == registers.end() ? 0u : found->second;
+}
+
+}
+
+void DecodeGraphicsPrograms(DrawDecode& decoded, const QueueState& queue, const ShaderRegistry& registry, bool staticAbi, bool includeFragment) {
+    using Stage = ShaderRecompiler::ShaderStage;
+    using Role = ShaderRecompiler::ProgramRole;
+    const auto programAddress = [&](std::uint32_t base) {
+        Graphics::NoteRegisterRead(Graphics::RegisterBank::Shader, base);
+        Graphics::NoteRegisterRead(Graphics::RegisterBank::Shader, base + 1);
+        const auto high = ReadGraphicsRegister(queue.shader, base + 1);
+        require((high & ~0xffu) == 0, "reserved graphics program address bits are set");
+        return (static_cast<std::uint64_t>(ReadGraphicsRegister(queue.shader, base)) << 8u) | (static_cast<std::uint64_t>(high) << 40u);
+    };
+    const bool pixelSkipped = Graphics::PixelProgramSkipped(queue);
+    const auto prepare = [&](std::uint64_t address, std::uint8_t type, Stage stage, std::uint32_t rsrc2, std::uint32_t userDataBase) {
+        const bool nullPixel = stage == Stage::Fragment && (address == 0 || pixelSkipped);
+        if (nullPixel) address = NullPixelProgramAddress();
+        const auto program = ProgramSnapshot(registry, address, {type});
+        const auto& snapshot = *program;
+        require((address - snapshot.codeAddress) % sizeof(std::uint32_t) == 0, "graphics entry point is not dword aligned");
+        require(snapshot.header.empty() || snapshot.type == type, "graphics program refers to an incompatible shader binary type");
+        if (!nullPixel && snapshot.header.empty()) NoteRawGraphicsDraw();
+        if (!nullPixel) Graphics::NoteRegisterRead(Graphics::RegisterBank::Shader, rsrc2);
+        const auto resources = nullPixel ? 0u : ReadGraphicsRegister(queue.shader, rsrc2);
+        const auto userCount = ((resources >> 1u) & 0x1fu) | (((resources >> 27u) & 1u) << 5u);
+        require(userCount <= 32, "graphics user SGPR count exceeds the register bank");
+        const auto codeOffset = static_cast<std::size_t>((address - snapshot.codeAddress) / sizeof(std::uint32_t));
+        DrawProgram result{
+            {stage, address, std::span(snapshot.code).subspan(codeOffset), snapshot.headerAddress, snapshot.header},
+            userDataBase,
+            8,
+            {},
+            {{{snapshot.codeAddress, std::as_bytes(std::span(snapshot.code))}, {snapshot.headerAddress, snapshot.header}}},
+            program,
+            codeOffset
+        };
+        for (std::uint32_t i = 0; i < userCount; ++i) {
+            Graphics::NoteRegisterRead(Graphics::RegisterBank::Shader, userDataBase + i);
+            result.userData.push_back((staticAbi ? ReadGraphicsRegister(queue.shader, userDataBase + i) : readUserData(queue.shader, userDataBase + i)));
+        }
+        return result;
+    };
+    {
+        auto* product = &decoded;
+        auto& programs = product->programs;
+        auto& roles = product->roles;
+        programs.reserve(5);
+        roles.reserve(5);
+        const auto append = [&](std::uint32_t base, std::uint8_t type, Stage stage, std::uint32_t resources, std::uint32_t users, Role role) {
+            programs.push_back(prepare(programAddress(base), type, stage, resources, users));
+            roles.push_back(role);
+        };
+        const auto initializeMerged = [&](DrawProgram& program, std::uint32_t pointerBase, bool pointerRequired) {
+            program.firstUserSgpr = 0;
+            program.userData.insert(program.userData.begin(), 8, 0);
+            Graphics::NoteRegisterRead(Graphics::RegisterBank::Shader, pointerBase);
+            Graphics::NoteRegisterRead(Graphics::RegisterBank::Shader, pointerBase + 1);
+            if (staticAbi) return;
+            if (!pointerRequired && !queue.shader.contains(pointerBase) && !queue.shader.contains(pointerBase + 1)) return;
+            const auto low = ReadGraphicsRegister(queue.shader, pointerBase);
+            const auto high = ReadGraphicsRegister(queue.shader, pointerBase + 1);
+            const auto address = static_cast<std::uint64_t>(low) | (static_cast<std::uint64_t>(high) << 32u);
+            require(address != 0 || !pointerRequired, "merged shader user-data address is null");
+            if (address == 0) return;
+            GuestMemory::CheckRange(reinterpret_cast<const void*>(address), 8, 4);
+            program.userData[0] = low;
+            program.userData[1] = high;
+        };
+        const auto& graphics = product->state;
+        if (graphics.stages.path == Graphics::ShaderPath::Tessellation) {
+            append(0x148, 5, Stage::Local, 0x10b, 0x10c, Role::Local);
+            append(0x108, 7, Stage::TessellationControl, 0x10b, 0x10c, Role::Hull);
+            initializeMerged(programs.back(), 0x102, true);
+            append(0x0c8, 2, Stage::TessellationEvaluation, 0x08b, 0x08c, Role::Domain);
+        } else if (graphics.stages.path == Graphics::ShaderPath::Geometry) {
+            const auto frontAddress = programAddress(0xc8);
+            const auto front = ProgramSnapshot(registry, frontAddress, {2, 4});
+            const auto type = front->header.empty() ? std::uint8_t{2} : front->type;
+            require(type == 2 || type == 4, "invalid geometry front binary type");
+            append(0xc8, type, Stage::Mesh, 0x8b, 0x8c, Role::Main);
+            initializeMerged(programs.back(), 0x82, type == 4);
+            if (type == 4) append(0x88, 6, Stage::Mesh, 0x8b, 0x8c, Role::GeometryBack);
+        } else {
+            append(0xc8, 2, Stage::Vertex, 0x8b, 0x8c, Role::Main);
+        }
+        if (includeFragment) {
+            if (pixelSkipped) {
+                const auto rejection = Graphics::NullPixelProgramRejection(queue);
+                require(rejection.empty(), rejection.c_str());
+            }
+            append(0x008, 1, Stage::Fragment, 0x00b, 0x00c, Role::Fragment);
+            programs.back().firstUserSgpr = 0;
+        }
+    }
+}
+
+std::shared_ptr<DrawDecode> Driver::decodeDraw(const QueueState& queue, const Submission& submission) {
+    auto product = std::make_shared<DrawDecode>();
+    bool vertexWorkgroup = false;
+    const auto stages = queue.context.find(0x2d5);
+    const auto low = queue.shader.find(0xc8);
+    const auto high = queue.shader.find(0xc9);
+    if (stages != queue.context.end() && (stages->second & 0x02002024u) == 0x2000u && low != queue.shader.end() && high != queue.shader.end()) {
+        const auto address = (static_cast<std::uint64_t>(low->second) << 8u) | (static_cast<std::uint64_t>(high->second & 0xffu) << 40u);
+        const auto front = ProgramSnapshot(*submission.shaders, address, {2});
+        vertexWorkgroup = front->header.empty() && ProgramUsesWorkgroup(*front, static_cast<std::size_t>((address - front->codeAddress) / sizeof(std::uint32_t)));
+    }
+    product->state = Graphics::DecodeState(queue, vertexWorkgroup);
+    DecodeGraphicsPrograms(*product, queue, *submission.shaders, false, true);
+    product->pixel = Graphics::DecodePixelStageInfo(queue.context, Graphics::ExportMappings(product->state), Graphics::PixelProgramSkipped(queue));
+    product->pixel.targetExportPacking = Graphics::ExportPackings(product->state);
+    product->pixel.dualSourceBlend = product->state.dualSourceBlend;
+    product->pixel.alphaToCoverage = product->state.alphaToCoverage;
+    return product;
+}
+
+namespace {
+
+// Decodes by the draw key's twin without user words (DrawKeyRanges::decodeKey), per queue worker:
+// draws that differ only in their user data (a ring-buffer address per sprite) almost never repeat
+// a draw key, so without it every draw decoded its registers again (a ninth of the queue worker).
+// APS5_NO_DECODE_CACHE=1 decodes every draw that misses the draw cache.
+bool decodeCacheEnabled() {
+    static const bool enabled = std::getenv("APS5_NO_DECODE_CACHE") == nullptr;
+    return enabled;
+}
+
+std::unordered_map<std::uint64_t, std::shared_ptr<const DrawDecode>>& decodeCache() {
+    static thread_local std::unordered_map<std::uint64_t, std::shared_ptr<const DrawDecode>> cache;
+    return cache;
+}
+
+// The cached decode with the programs' user words read again (the ones the decode key leaves out):
+// the cached object itself while they match, else a copy holding the current ones. The word count
+// is the stage's RSRC2 count (the register before the user words), as DecodeGraphicsPrograms reads
+// it; merged programs keep their leading words, a null pixel program has none.
+std::shared_ptr<const DrawDecode> withCurrentUserData(const std::shared_ptr<const DrawDecode>& cached, const QueueState& queue) {
+    std::shared_ptr<DrawDecode> copy;
+    for (std::size_t i = 0; i < cached->programs.size(); ++i) {
+        const auto& program = cached->programs[i];
+        const auto rsrc2 = queue.shader.find(program.userDataBase - 1u);
+        const auto resources = rsrc2 == queue.shader.end() ? 0u : rsrc2->second;
+        const auto count = std::min<std::size_t>(((resources >> 1u) & 0x1fu) | (((resources >> 27u) & 1u) << 5u), program.userData.size());
+        const auto prefix = program.userData.size() - count;
+        for (std::size_t word = 0; word < count; ++word) {
+            const auto value = readUserData(queue.shader, program.userDataBase + static_cast<std::uint32_t>(word));
+            const auto& current = copy != nullptr ? copy->programs[i].userData : program.userData;
+            if (current[prefix + word] == value) continue;
+            if (copy == nullptr) copy = std::make_shared<DrawDecode>(*cached);
+            copy->programs[i].userData[prefix + word] = value;
+        }
+    }
+    if (copy == nullptr) return cached;
+    return copy;
+}
+
+}
+
+void Driver::resolveDrawDecode(const QueueState& queue, const Submission& submission, std::shared_ptr<const DrawDecode>& decode, bool registerKey, std::uint64_t drawKey, bool profile) {
+    const bool useDecodeCache = decode == nullptr && registerKey && decodeCacheEnabled() && !verifyDrawRecipe();
+    const auto decodeKey = queue.drawKeyRanges.decodeKey;
+    if (useDecodeCache) {
+        auto& cache = decodeCache();
+        if (const auto found = cache.find(decodeKey); found != cache.end()) {
+            if (DecodeProgramsCurrent(*found->second, *submission.shaders)) {
+                decode = withCurrentUserData(found->second, queue);
+                return;
+            }
+            cache.erase(found);
+        }
+    }
+    if (decode == nullptr || verifyDrawRecipe()) {
+        std::vector<Graphics::RegisterRead> readLog;
+        struct LogScope {
+            explicit LogScope(std::vector<Graphics::RegisterRead>* log) { Graphics::RegisterReadLog() = log; }
+            ~LogScope() { Graphics::RegisterReadLog() = nullptr; }
+        } logScope(verifyDrawRecipe() && registerKey ? &readLog : nullptr);
+        auto fresh = decodeDraw(queue, submission);
+        if (verifyDrawRecipe() && registerKey) {
+            std::uint64_t facadeMismatches = 0;
+            for (const auto read : readLog) {
+                if (Graphics::DrawKeyCovers(read)) continue;
+                ++facadeMismatches;
+                static std::atomic<std::uint64_t> reports{0};
+                if (reports.fetch_add(1) < 20) std::fprintf(stderr, "[draw-cache] verify: the decoders read %s register 0x%x, which DrawKeyRegisters lacks\n", Graphics::RegisterBankName(read.bank), read.offset);
+            }
+            std::uint64_t decodeMismatches = 0;
+            if (decode != nullptr && !sameDecode(*decode, *fresh)) {
+                decodeMismatches = 1;
+                static std::atomic<std::uint64_t> reports{0};
+                if (reports.fetch_add(1) < 20) std::fprintf(stderr, "[draw-cache] verify: the entry's decode differs from a fresh decode (key 0x%llx, target 0x%llx)\n", static_cast<unsigned long long>(drawKey), static_cast<unsigned long long>(fresh->state.color.address));
+            }
+            std::lock_guard cacheLock(drawCacheMutex);
+            drawEntryCounters.facadeMismatches += facadeMismatches;
+            if (decode != nullptr) ++drawEntryCounters.verifyDecodes;
+            drawEntryCounters.verifyDecodeMismatches += decodeMismatches;
+        }
+        decode = std::move(fresh);
+        if (useDecodeCache) {
+            auto& cache = decodeCache();
+            if (cache.size() >= 4096) cache.clear();
+            cache[decodeKey] = decode;
+        }
+    } else if (profile) {
+        std::lock_guard cacheLock(drawCacheMutex);
+        ++drawEntryCounters.decodeSkipped;
+    }
+}
+
+}

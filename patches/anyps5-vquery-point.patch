@@ -1,0 +1,62 @@
+diff -ru a/core/libs/prx/libc/include/GuestAllocations.hpp b/core/libs/prx/libc/include/GuestAllocations.hpp
+--- a/core/libs/prx/libc/include/GuestAllocations.hpp	2026-10-24 13:33:16.493749263 +0500
++++ b/core/libs/prx/libc/include/GuestAllocations.hpp	2026-10-24 13:33:16.497749263 +0500
+@@ -44,6 +44,10 @@
+ void GuestAllocationsUnmap_nid_postfix(void* mutation, const void* pointer, std::size_t bytes, const std::function<void(const void*, std::size_t, const void*, bool)>& apply);
+ Lease GuestAllocationsAcquire_nid_postfix();
+ Lease GuestAllocationsAcquireAll_nid_postfix();
++// The range containing `address`, else (findNext) the first range above it, as AcquireAll's walk
++// would pick it: empty when none. A lookup in the registry instead of copying it per query
++// (sceKernelVirtualQuery runs per frame in Mewgenics).
++Lease GuestAllocationsQuery_nid_postfix(std::uintptr_t address, bool findNext);
+ // The readable ranges of GuestAllocationsAcquire that overlap [begin, end), in address order: a
+ // caller that only looks at a few allocations leases those instead of the whole registry (a copy and
+ // a pin of every range through the box64 bridge, per GPU mapping in the Mewgenics hub).
+diff -ru a/core/libs/prx/libc/src/GuestAllocations.cpp b/core/libs/prx/libc/src/GuestAllocations.cpp
+--- a/core/libs/prx/libc/src/GuestAllocations.cpp	2026-10-24 13:33:16.529749263 +0500
++++ b/core/libs/prx/libc/src/GuestAllocations.cpp	2026-10-24 13:33:16.537749263 +0500
+@@ -624,6 +624,25 @@
+     return result;
+ }
+ 
++Lease GuestAllocationsQuery_nid_postfix(std::uintptr_t address, bool findNext) {
++    std::lock_guard lock(registry().mutex);
++    const auto& ranges = registry().ranges;
++    Lease result;
++    const auto above = ranges.upper_bound(address);
++    // Ranges do not overlap: only the last non-empty range starting at or below the address can hold it.
++    for (auto it = above; it != ranges.begin();) {
++        --it;
++        if (it->second->bytes == 0) continue;
++        if (address < it->second->address + it->second->bytes) result.push_back(it->second);
++        break;
++    }
++    if (!result.empty() || !findNext) return result;
++    for (auto it = above; it != ranges.end(); ++it) {
++        if (it->second->bytes != 0) { result.push_back(it->second); break; }
++    }
++    return result;
++}
++
+ Lease GuestAllocationsAcquireAll_nid_postfix() {
+     std::lock_guard lock(registry().mutex);
+     Lease result;
+diff -ru a/core/libs/prx/libkernel/DirectMemory/Export.cpp b/core/libs/prx/libkernel/DirectMemory/Export.cpp
+--- a/core/libs/prx/libkernel/DirectMemory/Export.cpp	2026-10-24 13:33:16.557749263 +0500
++++ b/core/libs/prx/libkernel/DirectMemory/Export.cpp	2026-10-24 13:33:16.573749263 +0500
+@@ -1,3 +1,4 @@
++#include <cstdlib>
+ #include <cstdint>
+ #include <cstddef>
+ #include <cstring>
+@@ -241,8 +242,8 @@
+   info->end = reservedEnd;
+   return 0;
+  }
+- const auto lease = GuestAllocations::GuestAllocationsAcquireAll_nid_postfix();
+- assert(std::is_sorted(lease.begin(), lease.end(), [](const auto& left, const auto& right) { return left->address < right->address; }));
++ static const bool fullWalk = std::getenv("APS5_VQUERY_FULL_WALK") != nullptr;
++ const auto lease = fullWalk ? GuestAllocations::GuestAllocationsAcquireAll_nid_postfix() : GuestAllocations::GuestAllocationsQuery_nid_postfix(address, (flags & findNext) != 0);
+  const GuestAllocations::Range* best = nullptr;
+  for (const auto& range : lease) {
+   const auto begin = range->address;

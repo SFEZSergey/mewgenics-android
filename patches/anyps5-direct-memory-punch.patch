@@ -1,0 +1,91 @@
+diff --git a/core/libs/prx/libkernel/DirectMemory/DirectMemory.cpp b/core/libs/prx/libkernel/DirectMemory/DirectMemory.cpp
+index 76bce70..cb62d1a 100644
+--- a/core/libs/prx/libkernel/DirectMemory/DirectMemory.cpp
++++ b/core/libs/prx/libkernel/DirectMemory/DirectMemory.cpp
+@@ -23,6 +23,8 @@
+ 
+ #if defined(__linux__)
+ #include <fcntl.h>
++#include <linux/falloc.h>
++#include <time.h>
+ #include <sys/mman.h>
+ #include <unistd.h>
+ #include <fstream>
+@@ -243,6 +245,36 @@ int PhysicalFile() {
+ 
+ std::vector<bool> g_physicalUsed(DIRECT_MEMORY_SIZE / PS5_PAGE_SIZE);
+ 
++// Released physical memory goes back to the host: the backing file's pages of a released range
++// are punched out (they read as zeros afterwards, so a later allocation needs no clearing), else
++// every page the title ever touched stayed allocated in the memfd and was swapped out instead
++// (Mewgenics: ~5 GiB of direct memory in swap). Off unless APS5_PUNCH_RELEASED=1: GPU imports of
++// the backing (dma-buf over the memfd, pinned host pointers) keep the old pages, so after a punch
++// and a reuse the GPU read stale texels (broken floor and cursor, 2026-10-23).
++bool PunchReleased() {
++    static const bool enabled = std::getenv("APS5_PUNCH_RELEASED") != nullptr;
++    return enabled;
++}
++
++bool PunchPhysical(std::uint64_t start, std::size_t bytes) {
++    return bytes != 0 && ::fallocate(PhysicalFile(), FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, static_cast<off_t>(start), static_cast<off_t>(bytes)) == 0;
++}
++
++// [direct-memory] every 10 s while the title allocates or releases: what it holds now.
++std::uint64_t g_directAllocated = 0, g_directReleased = 0, g_directLive = 0, g_directPunched = 0;
++std::uint64_t g_directReported = 0;
++
++void ReportDirectMemory() {
++    timespec now{};
++    clock_gettime(CLOCK_MONOTONIC, &now);
++    const auto seconds = static_cast<std::uint64_t>(now.tv_sec);
++    if (g_directReported == 0) g_directReported = seconds;
++    if (seconds - g_directReported < 10) return;
++    g_directReported = seconds;
++    std::fprintf(stderr, "[direct-memory] 10 s: %llu MiB allocated, %llu MiB released (%llu MiB returned to the host); %llu MiB live\n", static_cast<unsigned long long>(g_directAllocated >> 20), static_cast<unsigned long long>(g_directReleased >> 20), static_cast<unsigned long long>(g_directPunched >> 20), static_cast<unsigned long long>(g_directLive >> 20));
++    g_directAllocated = g_directReleased = g_directPunched = 0;
++}
++
+ void ZeroReusedPhysical(std::uint64_t start, std::size_t bytes) {
+     const auto first = start / PS5_PAGE_SIZE;
+     const auto count = bytes / PS5_PAGE_SIZE;
+@@ -255,6 +287,10 @@ void ZeroReusedPhysical(std::uint64_t start, std::size_t bytes) {
+         std::size_t run = 0;
+         while (page + run < count && g_physicalUsed[first + page + run]) ++run;
+         const auto offset = (first + page) * PS5_PAGE_SIZE;
++        if (PunchReleased() && PunchPhysical(offset, run * PS5_PAGE_SIZE)) {
++            page += run;
++            continue;
++        }
+         void* view = ::mmap(nullptr, run * PS5_PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, PhysicalFile(), static_cast<off_t>(offset));
+         if (view == MAP_FAILED) throw std::system_error(errno, std::generic_category(), "map reused direct memory");
+         std::memset(view, 0, run * PS5_PAGE_SIZE);
+@@ -976,6 +1012,11 @@ void CreateDirectMemoryBacking(int64_t start, size_t len, int memoryType) {
+     for (std::size_t offset = 0; offset < len; offset += PS5_PAGE_SIZE) pages.emplace(first + offset, PhysicalPage{backing, offset});
+     g_physPages.merge(pages);
+     Trace("allocate physical 0x%llx+0x%zx", static_cast<unsigned long long>(first), len);
++#if defined(__linux__)
++    g_directAllocated += len;
++    g_directLive += len;
++    ReportDirectMemory();
++#endif
+ }
+ 
+ void ForgetDirectMemory(int64_t start, size_t len) {
+@@ -985,6 +1026,17 @@ void ForgetDirectMemory(int64_t start, size_t len) {
+     g_physPages.erase(g_physPages.lower_bound(first), g_physPages.lower_bound(first + len));
+     ErasePhysMappings(first, first + len);
+     Trace("release physical 0x%llx+0x%zx", static_cast<unsigned long long>(first), len);
++#if defined(__linux__)
++    g_directReleased += len;
++    g_directLive -= std::min<std::uint64_t>(g_directLive, len);
++    if (PunchReleased() && PunchPhysical(first, len)) {
++        g_directPunched += len;
++        const auto page = first / PS5_PAGE_SIZE;
++        const auto count = len / PS5_PAGE_SIZE;
++        for (std::size_t index = 0; index < count && page + index < g_physicalUsed.size(); ++index) g_physicalUsed[page + index] = false;
++    }
++    ReportDirectMemory();
++#endif
+ }
+ 
+ bool GuestReservation(std::uintptr_t addr, std::uintptr_t* start, std::uintptr_t* end) {

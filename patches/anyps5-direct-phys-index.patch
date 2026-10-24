@@ -1,0 +1,150 @@
+--- a/core/libs/prx/libkernel/DirectMemory/DirectMemory.cpp	2026-10-24 13:01:24.465749993 +0500
++++ b/core/libs/prx/libkernel/DirectMemory/DirectMemory.cpp	2026-10-24 13:33:16.441749263 +0500
+@@ -4,10 +4,13 @@
+ #include "prx/libc/include/GuestArena.hpp"
+ #include "prx/libc/include/GuestWriteWatch.hpp"
+ #include <algorithm>
++#include <bit>
++#include <array>
+ #include <cerrno>
+ #include <iterator>
+ #include <map>
+ #include <mutex>
++#include <set>
+ #include <cstdarg>
+ #include <cstdio>
+ #include <cstdlib>
+@@ -452,6 +455,44 @@
+ };
+ 
+ std::map<std::uintptr_t, DirectMapping> g_directMappings;
++// The same mappings by physical start (phys, base), one set per length class (bit width of the
++// length): releases and aliasing checks look mappings up by physical range, and walking every
++// mapping per release grew with the session. A mapping of class k is shorter than 2^k, so a query
++// scans each class only from 2^k below its range: one long mapping no longer widens the scan of all
++// the short ones. Every change of g_directMappings goes through PutMapping/TakeMapping.
++std::array<std::set<std::pair<std::uint64_t, std::uintptr_t>>, 65> g_mappingsByPhys;
++
++unsigned LengthClass(std::uint64_t bytes) {
++    return static_cast<unsigned>(std::bit_width(bytes));
++}
++
++std::map<std::uintptr_t, DirectMapping>::iterator PutMapping(std::uintptr_t base, DirectMapping mapping) {
++    const auto [it, inserted] = g_directMappings.emplace(base, std::move(mapping));
++    if (inserted) g_mappingsByPhys[LengthClass(it->second.end - base)].emplace(it->second.phys, base);
++    return it;
++}
++
++std::map<std::uintptr_t, DirectMapping>::iterator TakeMapping(std::map<std::uintptr_t, DirectMapping>::iterator it) {
++    g_mappingsByPhys[LengthClass(it->second.end - it->first)].erase({it->second.phys, it->first});
++    return g_directMappings.erase(it);
++}
++
++// Bases of the mappings whose physical range overlaps [first, last), in no particular order.
++std::vector<std::uintptr_t> MappingsOverlappingPhys(std::uint64_t first, std::uint64_t last) {
++    std::vector<std::uintptr_t> bases;
++    if (first >= last) return bases;
++    for (unsigned k = 0; k < g_mappingsByPhys.size(); ++k) {
++        const auto& set = g_mappingsByPhys[k];
++        if (set.empty()) continue;
++        const std::uint64_t reach = k >= 64 ? ~std::uint64_t{0} : (std::uint64_t{1} << k);
++        const auto from = first > reach ? first - reach : 0;
++        for (auto it = set.lower_bound({from, 0}); it != set.end() && it->first < last; ++it) {
++            const auto& mapping = g_directMappings.at(it->second);
++            if (mapping.phys + (mapping.end - it->second) > first) bases.push_back(it->second);
++        }
++    }
++    return bases;
++}
+ 
+ void EraseMappings(std::uintptr_t start, std::uintptr_t end) {
+     auto it = g_directMappings.lower_bound(start);
+@@ -459,29 +500,26 @@
+     while (it != g_directMappings.end() && it->first < end) {
+         const auto base = it->first;
+         const auto mapping = it->second;
+-        it = g_directMappings.erase(it);
+-        if (base < start) g_directMappings.emplace(base, DirectMapping{start, mapping.phys, mapping.memoryType, mapping.backing});
+-        if (mapping.end > end) it = g_directMappings.emplace(end, DirectMapping{mapping.end, mapping.phys + end - base, mapping.memoryType, mapping.backing}).first;
++        it = TakeMapping(it);
++        if (base < start) PutMapping(base, DirectMapping{start, mapping.phys, mapping.memoryType, mapping.backing});
++        if (mapping.end > end) it = PutMapping(end, DirectMapping{mapping.end, mapping.phys + end - base, mapping.memoryType, mapping.backing});
+     }
+ }
+ 
+ void ErasePhysMappings(std::uint64_t first, std::uint64_t last) {
+-    for (auto it = g_directMappings.begin(); it != g_directMappings.end();) {
+-        const auto base = it->first;
++    // Each overlapping mapping is cut on its own; the pieces left outside [first, last) overlap nothing.
++    for (const auto base : MappingsOverlappingPhys(first, last)) {
++        const auto it = g_directMappings.find(base);
+         const auto mapping = it->second;
+         const auto mappingLast = mapping.phys + (mapping.end - base);
+-        if (mapping.phys >= last || mappingLast <= first) {
+-            ++it;
+-            continue;
+-        }
+-        it = g_directMappings.erase(it);
++        TakeMapping(it);
+         if (mapping.phys < first) {
+             const auto keep = first - mapping.phys;
+-            g_directMappings.emplace(base, DirectMapping{base + keep, mapping.phys, mapping.memoryType, mapping.backing});
++            PutMapping(base, DirectMapping{base + keep, mapping.phys, mapping.memoryType, mapping.backing});
+         }
+         if (mappingLast > last) {
+             const auto skip = last - mapping.phys;
+-            it = g_directMappings.emplace(base + skip, DirectMapping{mapping.end, last, mapping.memoryType, mapping.backing}).first;
++            PutMapping(base + skip, DirectMapping{mapping.end, last, mapping.memoryType, mapping.backing});
+         }
+     }
+ }
+@@ -502,7 +540,8 @@
+     for (auto added = g_directMappings.lower_bound(address); added != g_directMappings.end() && added->first < end; ++added) {
+         const auto addedPhys = added->second.phys;
+         const auto addedPhysEnd = addedPhys + (added->second.end - added->first);
+-        for (const auto& [base, other] : g_directMappings) {
++        for (const auto base : MappingsOverlappingPhys(addedPhys, addedPhysEnd)) {
++            const auto& other = g_directMappings.at(base);
+             if ((base >= address && base < end) || other.backing != added->second.backing) continue;
+             const auto first = std::max(addedPhys, other.phys);
+             const auto last = std::min(addedPhysEnd, other.phys + (other.end - base));
+@@ -584,7 +623,7 @@
+             bytes += PS5_PAGE_SIZE;
+         }
+         page.backing->Map(address + offset, bytes, page.offset, nativeProt);
+-        g_directMappings.emplace(address + offset, DirectMapping{address + offset + bytes, phys + offset, page.backing->MemoryType(), page.backing});
++        PutMapping(address + offset, DirectMapping{address + offset + bytes, phys + offset, page.backing->MemoryType(), page.backing});
+         offset += bytes;
+     }
+ #if defined(__linux__)
+@@ -1011,13 +1050,13 @@
+         while (it != g_directMappings.end() && it->first < end) {
+             const auto base = it->first;
+             const auto mapping = it->second;
+-            it = g_directMappings.erase(it);
+-            if (base < first) g_directMappings.emplace(base, DirectMapping{first, mapping.phys, mapping.memoryType, mapping.backing});
++            it = TakeMapping(it);
++            if (base < first) PutMapping(base, DirectMapping{first, mapping.phys, mapping.memoryType, mapping.backing});
+             const auto low = std::max(base, first);
+             const auto high = std::min(mapping.end, end);
+-            g_directMappings.emplace(low, DirectMapping{high, mapping.phys + low - base, type, mapping.backing});
++            PutMapping(low, DirectMapping{high, mapping.phys + low - base, type, mapping.backing});
+             physical.emplace_back(mapping.phys + low - base, high - low);
+-            if (mapping.end > end) it = g_directMappings.emplace(end, DirectMapping{mapping.end, mapping.phys + end - base, mapping.memoryType, mapping.backing}).first;
++            if (mapping.end > end) it = PutMapping(end, DirectMapping{mapping.end, mapping.phys + end - base, mapping.memoryType, mapping.backing});
+         }
+     }
+     for (const auto& [phys, bytes] : physical) DirectMemoryRetype(static_cast<int64_t>(phys), bytes, type);
+@@ -1141,7 +1180,11 @@
+     const auto last = first + len;
+     std::vector<DirectMemoryView> views;
+     std::lock_guard lock(g_directLock);
+-    for (const auto& [base, mapping] : g_directMappings) {
++    // In virtual-address order, as the old walk over every mapping produced them (adjacent views merge).
++    auto bases = MappingsOverlappingPhys(first, last);
++    std::sort(bases.begin(), bases.end());
++    for (const auto base : bases) {
++        const auto& mapping = g_directMappings.at(base);
+         const auto mappingLast = mapping.phys + (mapping.end - base);
+         if (mapping.phys >= last || mappingLast <= first) continue;
+         const auto viewStart = base + (std::max(first, mapping.phys) - mapping.phys);

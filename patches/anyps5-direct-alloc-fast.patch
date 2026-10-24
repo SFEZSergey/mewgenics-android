@@ -1,0 +1,23 @@
+diff --git a/core/libs/prx/libkernel/DirectMemory/MemoryPool.cpp b/core/libs/prx/libkernel/DirectMemory/MemoryPool.cpp
+index d7c6c65..c4903a2 100644
+--- a/core/libs/prx/libkernel/DirectMemory/MemoryPool.cpp
++++ b/core/libs/prx/libkernel/DirectMemory/MemoryPool.cpp
+@@ -18,7 +18,18 @@ struct PhysicalMemoryPool {
+         uint64_t start = static_cast<uint64_t>(searchStart);
+         uint64_t end = static_cast<uint64_t>(searchEnd);
+         uint64_t cur = (start + align - 1) & ~(align - 1);
++        // First fit over the allocated blocks: a candidate overlapping a block jumps past it, so a
++        // search walks the blocks instead of every aligned page (a title holding ~7 GiB made each
++        // allocation scan ~450k pages; PhysicalMemoryPool::Alloc was the hottest x86 function of the
++        // game thread). The page flags still confirm a candidate; a mismatch steps one alignment.
++        auto it = _blocks.upper_bound(cur);
++        if (it != _blocks.begin() && std::prev(it)->second.end > cur) --it;
+         while (cur + len <= end && cur + len <= DIRECT_MEMORY_SIZE) {
++            while (it != _blocks.end() && it->second.end <= cur) ++it;
++            if (it != _blocks.end() && it->first < cur + len) {
++                cur = (it->second.end + align - 1) & ~(align - 1);
++                continue;
++            }
+             if (_isFree(cur, len)) {
+                 CreateDirectMemoryBacking(static_cast<int64_t>(cur), len, memoryType);
+                 _mark(cur, len, true);

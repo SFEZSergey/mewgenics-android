@@ -1,0 +1,29 @@
+diff --git a/src/libtools/auxval.c b/src/libtools/auxval.c
+index 8169416..5d7c70c 100644
+--- a/src/libtools/auxval.c
++++ b/src/libtools/auxval.c
+@@ -20,6 +20,9 @@
+ #include "emu/x64emu_private.h"
+ #include "box64stack.h"
+ #include "auxval.h"
++#ifdef ANDROID
++#include <sys/auxv.h>
++#endif
+ 
+ static uintptr_t* auxval_start = NULL;
+ 
+@@ -46,6 +49,14 @@ __attribute__((section(".init_array"))) static void *init_auxval_constructor = &
+ 
+ unsigned long real_getauxval(unsigned long type)
+ {
++#ifdef ANDROID
++    // In an app process (libbox64.so loaded into a zygote child) the words after the startup environment are not
++    // reliably the auxv: AT_HWCAP came back without any extension bit and the dynarec ran with ASIMD only (no LSE
++    // atomics, FLAGM, FRINT...). Bionic keeps the process auxv itself.
++    unsigned long value = getauxval(type);
++    if(value)
++        return value;
++#endif
+     if(!auxval_start)
+         return 0;
+     uintptr_t* p = auxval_start;

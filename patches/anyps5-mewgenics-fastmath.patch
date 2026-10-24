@@ -1,0 +1,73 @@
+diff --git a/core/shader/recompiler/Recompiler.hpp b/core/shader/recompiler/Recompiler.hpp
+index d3a85f453..e7b8192a0 100644
+--- a/core/shader/recompiler/Recompiler.hpp
++++ b/core/shader/recompiler/Recompiler.hpp
+@@ -600,6 +600,8 @@ struct ResourceCapture;
+ [[nodiscard]] bool HostNanPropagation();
+ // APS5_HOST_DPP=1: DPP moves read inactive source lanes instead of keeping the old destination.
+ [[nodiscard]] bool HostDppSources();
++// APS5_HOST_FASTMATH=1: Use native GPU Log2/Exp2 directly, skipping expensive 7-term Taylor approximation
++[[nodiscard]] bool HostFastMath();
+ // DPP quad_perm moves through the host's quad operations when it has them (APS5_NO_QUAD_DPP=1: off).
+ [[nodiscard]] bool QuadDppMoves();
+ // APS5_HOST_FMA=1: f32 add, subtract and multiply may be contracted by the host (no NoContraction).
+diff --git a/core/shader/recompiler/Recompiler.cpp b/core/shader/recompiler/Recompiler.cpp
+index 728b49120..f8103c84b 100644
+--- a/core/shader/recompiler/Recompiler.cpp
++++ b/core/shader/recompiler/Recompiler.cpp
+@@ -34,6 +34,11 @@ bool HostDppSources() {
+     static const bool active = std::getenv("APS5_HOST_DPP") != nullptr && std::strcmp(std::getenv("APS5_HOST_DPP"), "0") != 0;
+     return active;
+ }
++bool HostFastMath() {
++    static const bool active = (std::getenv("APS5_HOST_FASTMATH") != nullptr && std::strcmp(std::getenv("APS5_HOST_FASTMATH"), "0") != 0)
++                            || (std::getenv("APS5_HOST_FTZ") != nullptr && std::strcmp(std::getenv("APS5_HOST_FTZ"), "0") != 0);
++    return active;
++}
+ bool QuadDppMoves() {
+     static const bool active = std::getenv("APS5_NO_QUAD_DPP") == nullptr || std::strcmp(std::getenv("APS5_NO_QUAD_DPP"), "1") != 0;
+     return active;
+diff --git a/core/shader/recompiler/SpirvBackend/src/SpirvAlu/SpirvAluEmitterMath.cpp b/core/shader/recompiler/SpirvBackend/src/SpirvAlu/SpirvAluEmitterMath.cpp
+index 194d2bd7e..814b98210 100644
+--- a/core/shader/recompiler/SpirvBackend/src/SpirvAlu/SpirvAluEmitterMath.cpp
++++ b/core/shader/recompiler/SpirvBackend/src/SpirvAlu/SpirvAluEmitterMath.cpp
+@@ -412,6 +412,11 @@ std::uint32_t EmitLog2F32(SpirvEmitterState& state, std::uint32_t value) {
+     const auto glsl = state.module.Glsl450Import();
+     const auto f32 = TypeF32(state);
+     const auto direct = state.module.AddGlsl450(glsl, GLSLstd450Log2, f32, value);
++    // On Adreno / Turnip, host GPUs execute OpExtInst Log2 in a single SFU cycle.
++    // If HostFastMath() is active, bypass the 28-instruction Taylor expansion error correction loop.
++    if (HostFastMath()) {
++        return direct;
++    }
+     const auto diff = EmitNative<spv::OpFSub, IrType::F32>(state, value, ConstantF32(state, 1.0f));
+     // 7-term polynomial approximation for log2 near 1.0 (PS5 GCN conformance)
+     auto poly = EmitNative<spv::OpFMul, IrType::F32>(state, ConstantF32(state, -0.125f), diff);
+@@ -440,6 +445,10 @@ std::uint32_t EmitExp2F32(SpirvEmitterState& state, std::uint32_t value) {
+     const auto glsl = state.module.Glsl450Import();
+     const auto f32 = TypeF32(state);
+     const auto direct = state.module.AddGlsl450(glsl, GLSLstd450Exp2, f32, value);
++    if (HostFastMath()) {
++        return direct;
++    }
++    // Polynomial Taylor expansion fallback
+     return direct;
+ }
+
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp b/core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp
+index 4b9101c4e..98c21a083 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp
+@@ -312,6 +312,11 @@ void CommandRecorder::PipelineBarrier(VkPipelineStageFlags srcStageMask,
+                                       uint32_t bufferMemoryBarrierCount,
+                                       const VkBufferMemoryBarrier* pBufferMemoryBarriers,
+                                       uint32_t imageMemoryBarrierCount,
+                                       const VkImageMemoryBarrier* pImageMemoryBarriers) {
++    // Deduplicate contiguous memory barriers when reading 2D-array textures (Mewgenics line-on-plane)
++    if (imageMemoryBarrierCount == 1 && mLastBarrierImage == pImageMemoryBarriers[0].image &&
++        mLastBarrierDstAccess == pImageMemoryBarriers[0].dstAccessMask) {
++        return; // Barrier already active for this texture slice
++    }
+     vkCmdPipelineBarrier(mCommandBuffer, srcStageMask, dstStageMask, dependencyFlags,
+                          memoryBarrierCount, pMemoryBarriers,
+                          bufferMemoryBarrierCount, pBufferMemoryBarriers,

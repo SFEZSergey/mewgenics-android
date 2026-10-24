@@ -1,0 +1,156 @@
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/include/GuestMemory.hpp b/core/libs/prx/libSceAgcDriver/Execution/include/GuestMemory.hpp
+index d53a0eb..2db7c9b 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/include/GuestMemory.hpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/include/GuestMemory.hpp
+@@ -197,6 +197,12 @@ void FlushGpuWrites(std::uint64_t address, std::size_t bytes);
+ // value before consulting the page states and reading directly, and the same value after, knows
+ // the states it consulted were current and no page it read changed its mapping meanwhile.
+ std::uint64_t ForgetSerial();
++// Ranges the guest registry changed (mapped, unmapped, re-protected; libc's invalidator), for the
++// host imports: Pending says some were logged since the last take; Take moves them into `into` and
++// returns false when the log is incomplete (its first take, or more ranges than it keeps), in which
++// case the caller must reconcile with the whole registry.
++bool RegistryChangesPending();
++bool TakeRegistryChanges(std::vector<std::pair<std::uintptr_t, std::size_t>>& into);
+ 
+ // Attribution of guest memory accesses (the [hooksync] line in Recorder.cpp and the read-site
+ // counts of the [guestmem] line, APS5_PROFILE_DRAW): a sync the flush hook makes for an access has
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/src/GuestMemory.cpp b/core/libs/prx/libSceAgcDriver/Execution/src/GuestMemory.cpp
+index 013905f..b0e725e 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/GuestMemory.cpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/GuestMemory.cpp
+@@ -495,6 +495,32 @@ void ForgetPages(std::uintptr_t address, std::size_t bytes) {
+     forgetSerial.fetch_add(1, std::memory_order_release);
+ }
+ 
++// The registry changes the host imports have not seen yet (TakeRegistryChanges). `primed` turns on
++// with the first take: changes before the invalidator was registered were never logged, so that
++// take reports the log incomplete.
++struct RegistryChangeLog {
++    std::mutex mutex;
++    std::vector<std::pair<std::uintptr_t, std::size_t>> ranges;
++    bool overflow = false;
++    bool primed = false;
++};
++RegistryChangeLog& RegistryChanges() {
++    static RegistryChangeLog log;
++    return log;
++}
++std::atomic<bool> registryChangesPending{false};
++std::atomic<bool> pageCachesOn{false};
++
++// The libc invalidator: forgets the cached page states and logs the range for the host imports.
++void RegistryChanged(std::uintptr_t address, std::size_t bytes) {
++    if (pageCachesOn.load(std::memory_order_acquire)) ForgetPages(address, bytes);
++    auto& log = RegistryChanges();
++    std::lock_guard lock(log.mutex);
++    if (log.ranges.size() < 4096) log.ranges.emplace_back(address, bytes);
++    else log.overflow = true;
++    registryChangesPending.store(true, std::memory_order_release);
++}
++
+ void PageStates::initialize() {
+     std::call_once(once, [&] {
+         GuestArena::GuestArenaRange_nid_postfix(&arena.base, &arena.size);
+@@ -517,7 +543,8 @@ void PageStates::initialize() {
+             imageCached = image.allocate();
+         }
+ #endif
+-        if (arenaCached || imageCached) GuestAllocations::GuestAllocationsSetInvalidator_nid_postfix(&ForgetPages);
++        pageCachesOn.store(arenaCached || imageCached, std::memory_order_release);
++        GuestAllocations::GuestAllocationsSetInvalidator_nid_postfix(&RegistryChanged);
+     });
+ }
+ 
+@@ -777,6 +804,23 @@ std::uint64_t ForgetSerial() {
+     return forgetSerial.load(std::memory_order_acquire);
+ }
+ 
++bool RegistryChangesPending() {
++    return registryChangesPending.load(std::memory_order_acquire);
++}
++
++bool TakeRegistryChanges(std::vector<std::pair<std::uintptr_t, std::size_t>>& into) {
++    Pages().initialize();
++    into.clear();
++    auto& log = RegistryChanges();
++    std::lock_guard lock(log.mutex);
++    into.swap(log.ranges);
++    const bool complete = log.primed && !log.overflow;
++    log.primed = true;
++    log.overflow = false;
++    registryChangesPending.store(false, std::memory_order_release);
++    return complete;
++}
++
+ Commitment DescribeCommitted(std::uint64_t address, std::size_t bytes, bool writable) {
+     require(bytes <= std::numeric_limits<std::uint64_t>::max() - address, "address range overflow");
+     const TimedAccess timed(CounterVerify, bytes);
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp b/core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp
+index a4c1db4..37fdbce 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp
+@@ -158,6 +158,8 @@ struct HostImports {
+     std::set<std::uint64_t> unaliasedSpans;
+     // Registry generation the imports were last reconciled with.
+     std::uint64_t refreshedGeneration = 0;
++    // The largest import, so a changed range finds every import it overlaps (importsUntouched).
++    std::uint64_t largestImport = 0;
+     // Bumped whenever an import is dropped, so HostImport pointers taken under the lock earlier can be
+     // reused while it is unchanged.
+     std::uint64_t epoch = 1;
+@@ -845,6 +847,7 @@ const HostImport* importAllocation(const Context& context, HostImports& state, s
+     state.liveBytes += bytes;
+     if (trace) std::fprintf(stderr, "[gpu] host import of 0x%llx+0x%llx ok (%zu live, %.1f MiB live, %.1f MiB ever)\n", static_cast<unsigned long long>(base), static_cast<unsigned long long>(bytes), state.imports.size() + 1, state.liveBytes / 1048576.0, importedBytes / 1048576.0);
+     const auto [placed, inserted] = state.imports.emplace(base, entry);
++    state.largestImport = std::max<std::uint64_t>(state.largestImport, bytes);
+ #ifdef __ANDROID__
+     // An entry already there keeps its own state; this import's unwatched range must not be lost.
+     if (!inserted && entry.rewatchAtNs != 0) GuestWriteWatch::GuestWriteWatchRegister_nid_postfix(reinterpret_cast<const void*>(base), static_cast<std::size_t>(bytes));
+@@ -3833,13 +3836,45 @@ std::uint64_t ImageMirrorSerial(const Context& context, std::uint64_t address, s
+     return mirror != nullptr && !mirror->writable ? mirror->serial : 0;
+ }
+ 
++// Whether the registry changes logged since the last take (GuestMemory::TakeRegistryChanges) miss
++// every import and every failed import, so the imports stay reconciled without a registry walk.
++// The game's heap allocations and frees move the generation all the time without touching memory
++// the GPU imported; the walk (a lease of the whole registry) cost a fifth of the draw recorder.
++bool importsUntouched(const HostImports& state) {
++    static thread_local std::vector<std::pair<std::uintptr_t, std::size_t>>* changesSlot = nullptr;
++    auto& changes = ShaderRecompiler::ThreadOwned(changesSlot);
++    if (!GuestMemory::TakeRegistryChanges(changes)) return false;
++    for (const auto& [address, bytes] : changes) {
++        const std::uint64_t end = address + bytes;
++        auto it = state.imports.lower_bound(address > state.largestImport ? address - state.largestImport : 0);
++        for (; it != state.imports.end() && it->first < end; ++it) {
++            if (it->second.base < end && it->second.base + it->second.bytes > address) return false;
++        }
++        if (const auto failed = state.failed.lower_bound(address); failed != state.failed.end() && *failed < end) return false;
++    }
++    return true;
++}
++
+ std::uint64_t HostImportSerial(const Context& context, std::uint64_t address, std::size_t bytes, bool reconcile) {
+     if (context.hostImportAlignment == 0 || bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return 0;
+     auto& state = Imports();
+     std::lock_guard lock(state.mutex);
+     // An import whose registered range changed must not be reused: reconcile first, as an upload
+     // does (the walk only runs when the registry changed since the last one).
+-    if (reconcile && GuestAllocations::GuestAllocationsGeneration_nid_postfix() != state.refreshedGeneration) static_cast<void>(refreshImports(context, state, GuestAllocations::GuestAllocationsAcquire_nid_postfix()));
++    // Logged changes that miss the imports only move the reconciled generation; the generation is
++    // read before the log is taken, so a change logged after the read is still pending next time.
++    static const bool walkAlways = std::getenv("APS5_IMPORT_WALK_ALWAYS") != nullptr;
++    if (reconcile && (GuestAllocations::GuestAllocationsGeneration_nid_postfix() != state.refreshedGeneration || (!walkAlways && GuestMemory::RegistryChangesPending()))) {
++        const auto generation = GuestAllocations::GuestAllocationsGeneration_nid_postfix();
++        if (!walkAlways && state.device == context.device && importsUntouched(state)) {
++            state.refreshedGeneration = generation;
++        } else {
++            // A walk owed to a change logged after the generation was taken must not stop at the
++            // generation check.
++            state.refreshedGeneration = 0;
++            refreshImports(context, state, GuestAllocations::GuestAllocationsAcquire_nid_postfix());
++        }
++    }
+     auto found = state.imports.upper_bound(address);
+     if (found == state.imports.begin()) return 0;
+     --found;

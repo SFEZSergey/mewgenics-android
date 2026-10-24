@@ -1,0 +1,354 @@
+diff --git a/core/shader/recompiler/IntermediateRepresentation/include/IntermediateRepresentation/IrMetadata/ResourcePlan.hpp b/core/shader/recompiler/IntermediateRepresentation/include/IntermediateRepresentation/IrMetadata/ResourcePlan.hpp
+index cb9565f..315dc31 100644
+--- a/core/shader/recompiler/IntermediateRepresentation/include/IntermediateRepresentation/IrMetadata/ResourcePlan.hpp
++++ b/core/shader/recompiler/IntermediateRepresentation/include/IntermediateRepresentation/IrMetadata/ResourcePlan.hpp
+@@ -53,6 +53,9 @@ struct UniformFillPlan {
+ inline constexpr std::uint32_t NativePushSlotSize = sizeof(PushData);
+ inline constexpr std::uint32_t NativePushConstantSize = 2u * NativePushSlotSize;
+ 
++// ResourceMaterializer's memo of this plan's snapshots (Optimization/src/ResourceMaterializer.cpp).
++struct MaterializeMemo;
++
+ struct IrResourcePlan {
+     IrShaderStage stage = IrShaderStage::Unknown;
+     std::uint64_t shaderHash = 0;
+@@ -77,6 +80,8 @@ struct IrResourcePlan {
+     bool resourceTrackingComplete = false;
+     ShaderInfo info;
+     UniformFillPlan uniformFill;
++    // Made on the first Materialize (under the memo's global mutex).
++    mutable std::shared_ptr<MaterializeMemo> materializeMemo;
+ };
+ 
+ }
+diff --git a/core/shader/recompiler/Optimization/include/Optimization/ResourceMaterializer.hpp b/core/shader/recompiler/Optimization/include/Optimization/ResourceMaterializer.hpp
+index 5bd1493..a5b7d59 100644
+--- a/core/shader/recompiler/Optimization/include/Optimization/ResourceMaterializer.hpp
++++ b/core/shader/recompiler/Optimization/include/Optimization/ResourceMaterializer.hpp
+@@ -21,6 +21,11 @@ public:
+     static void PrepareImageModes(ShaderInfo& info);
+     [[nodiscard]] IrResourcePlan ExtractPlan(const IrProgram& program) const;
+     void Materialize(const IrResourcePlan& program, const SrtRuntime& runtime, ResourceSnapshot& snapshot) const;
++
++private:
++    void materializeWalked(const IrResourcePlan& program, const SrtRuntime& runtime, ResourceSnapshot& snapshot) const;
++
++public:
+     static std::uint64_t SpecializationNanoseconds();
+     static std::uint32_t BindlessSlots();
+     static void CountBindlessRejection(BindlessRejection reason);
+diff --git a/core/shader/recompiler/Optimization/src/ResourceMaterializer.cpp b/core/shader/recompiler/Optimization/src/ResourceMaterializer.cpp
+index 9325f62..c46257d 100644
+--- a/core/shader/recompiler/Optimization/src/ResourceMaterializer.cpp
++++ b/core/shader/recompiler/Optimization/src/ResourceMaterializer.cpp
+@@ -3,6 +3,7 @@
+ #include "Optimization/ShaderStageInputInfo.hpp"
+ #include "RdnaDecoder/RdnaDescriptorFormat.hpp"
+ #include "RdnaDecoder/RdnaImageOpDecoder.hpp"
++#include "IntermediateRepresentation/GuestRegister.hpp"
+ #include "SpirvBackend/SpirvBufferFormat.hpp"
+ #include <algorithm>
+ #include <array>
+@@ -981,7 +982,302 @@ IrResourcePlan ResourceMaterializer::ExtractPlan(const IrProgram& program) const
+     return plan;
+ }
+ 
++// The snapshot memo (design: queue-worker profile 2026-10-23, the SRT walk was a fifth of the
++// worker in a sprite-heavy title). A snapshot is a pure function of the plan, the user words, the
++// shader base and the words the walk reads (through the runtime's reader and probe), so an entry
++// keeps those inputs: the key holds the user words and the shader base, the log every reader and
++// probe call in order with its answer. A lookup replays the log through the live callbacks (their
++// side effects, the capture's read regions, happen as in a walk) and takes the entry only when
++// every answer repeats; the walk would then have made the same calls and computed the same
++// snapshot. User words the plan only copies whole into buffer descriptor dwords ("pass-through":
++// a constant ring-buffer V# in user SGPRs, a new base per sprite) stay out of the key and are
++// written into the copy instead. APS5_NO_MATERIALIZE_MEMO=1 walks every time;
++// APS5_VERIFY_MATERIALIZE_MEMO=1 walks after every hit too and reports differing snapshots.
++struct MaterializeMemo {
++    struct Call {
++        std::uint8_t kind = 0;  // 0 reader, 1 specialization reader, 2 probe
++        bool answer = false;
++        std::uint64_t address = 0;
++        std::uint64_t bytes = 0;
++        std::uint32_t value = 0;
++    };
++    struct Patch {
++        std::uint32_t buffer = 0;
++        std::uint32_t dword = 0;
++        std::uint32_t user = 0;
++    };
++    struct Entry {
++        std::vector<std::uint32_t> key;
++        std::vector<Call> calls;
++        std::vector<Patch> patches;
++        ResourceSnapshot snapshot;
++    };
++    // Per user word: 1 when it is pass-through (see above).
++    std::vector<std::uint8_t> passThrough;
++    // Per buffer: the (dword, user word) pairs that read a pass-through word.
++    std::vector<std::vector<std::pair<std::uint32_t, std::uint32_t>>> bufferUserDwords;
++    std::vector<std::shared_ptr<const Entry>> entries;
++};
++
++namespace {
++
++std::mutex& materializeMemoMutex() {
++    static std::mutex mutex;
++    return mutex;
++}
++
++struct MemoCounters {
++    std::atomic<std::uint64_t> hits{0}, misses{0}, replayMismatches{0}, skipped{0}, verifyMismatches{0};
++    std::atomic<std::int64_t> reported{0};
++};
++
++MemoCounters& memoCounters() {
++    static MemoCounters counters;
++    return counters;
++}
++
++void reportMemo() {
++    static const bool report = std::getenv("APS5_PROFILE_DRAW") != nullptr || std::getenv("APS5_VERIFY_MATERIALIZE_MEMO") != nullptr;
++    if (!report) return;
++    auto& counters = memoCounters();
++    const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
++    auto last = counters.reported.load(std::memory_order_relaxed);
++    if (last == 0) {
++        counters.reported.compare_exchange_strong(last, now, std::memory_order_relaxed);
++        return;
++    }
++    if (now - last < 10'000'000'000ll || !counters.reported.compare_exchange_strong(last, now, std::memory_order_relaxed)) return;
++    std::fprintf(stderr, "[materialize-memo] (10 s) %llu hits, %llu misses, %llu replays differed, %llu not memoized, %llu verify mismatches\n", static_cast<unsigned long long>(counters.hits.exchange(0)), static_cast<unsigned long long>(counters.misses.exchange(0)), static_cast<unsigned long long>(counters.replayMismatches.exchange(0)), static_cast<unsigned long long>(counters.skipped.exchange(0)), static_cast<unsigned long long>(counters.verifyMismatches.exchange(0)));
++}
++
++// The user word a GetUserData value reads, or nullopt when it reads none of the plan's words.
++std::optional<std::uint32_t> userWordOf(const IrResourcePlan& plan, const IrValue* value) {
++    if (value == nullptr || value->Opcode() != IrOpcode::GetUserData || value->ArgumentCount() == 0) return std::nullopt;
++    const auto reg = RegIndex(static_cast<ScalarReg>(value->Argument(0)->Register().index));
++    if (reg < plan.userDataBase || reg - plan.userDataBase >= plan.userDataCount) return std::nullopt;
++    return reg - plan.userDataBase;
++}
++
++// Pass-through user words of a plan: read only as whole dwords of buffer descriptors (the first
++// info.buffers.size() materialization sources, used nowhere else), never as an operand, an SRT
++// read, a condition or a uniform-fill value. A plan with a phi anywhere in its walk keeps all words
++// in the key (an invariant phi resolves through the blocks, not its operands).
++void analyzePassThrough(const IrResourcePlan& plan, MaterializeMemo& memo) {
++    const auto users = static_cast<std::size_t>(plan.userDataCount);
++    std::vector<std::uint8_t> asBufferRoot(users, 0u), consumed(users, 0u);
++    std::vector<std::uint8_t> bufferSource(plan.descriptorSources.size(), 0u), otherSource(plan.descriptorSources.size(), 0u);
++    const auto buffers = std::min<std::size_t>(plan.info.buffers.size(), plan.materializationSources.size());
++    for (std::size_t i = 0; i < plan.materializationSources.size(); ++i) {
++        const auto source = plan.materializationSources[i];
++        if (source >= plan.descriptorSources.size()) return;
++        (i < buffers ? bufferSource : otherSource)[source] = 1u;
++    }
++    bool phi = false;
++    std::unordered_map<const IrValue*, bool> visited;
++    std::vector<const IrValue*> stack;
++    const auto walk = [&](const IrValue* root, bool bufferRoot) {
++        if (root == nullptr) return;
++        root = root->Resolve();
++        if (const auto user = userWordOf(plan, root)) {
++            (bufferRoot ? asBufferRoot : consumed)[*user] = 1u;
++        }
++        stack.push_back(root);
++        while (!stack.empty()) {
++            const auto* value = stack.back();
++            stack.pop_back();
++            if (visited.contains(value)) continue;
++            visited.emplace(value, true);
++            if (value->Opcode() == IrOpcode::Phi) phi = true;
++            if (value->Opcode() == IrOpcode::GetUserData) continue;
++            for (std::size_t index = 0; index < value->ArgumentCount(); ++index) {
++                const auto* argument = value->Argument(index);
++                if (argument == nullptr) continue;
++                argument = argument->Resolve();
++                if (const auto user = userWordOf(plan, argument)) consumed[*user] = 1u;
++                stack.push_back(argument);
++            }
++        }
++    };
++    for (std::size_t source = 0; source < plan.descriptorSources.size(); ++source) {
++        const auto& descriptor = plan.descriptorSources[source];
++        const bool bufferOnly = bufferSource[source] != 0u && otherSource[source] == 0u && !descriptor.indirectImage.has_value();
++        for (std::uint32_t dword = 0; dword < descriptor.dwordCount && dword < descriptor.dwords.size(); ++dword) walk(descriptor.dwords[dword], bufferOnly);
++    }
++    for (const auto& read : plan.srtReads) walk(read.value, false);
++    for (const auto& block : plan.controlFlow) walk(block.condition, false);
++    for (const auto* value : plan.uniformFill.values) walk(value, false);
++    if (phi) return;
++    memo.passThrough.assign(users, 0u);
++    for (std::size_t user = 0; user < users; ++user) memo.passThrough[user] = asBufferRoot[user] != 0u && consumed[user] == 0u ? 1u : 0u;
++    memo.bufferUserDwords.assign(buffers, {});
++    for (std::size_t buffer = 0; buffer < buffers; ++buffer) {
++        const auto& descriptor = plan.descriptorSources[plan.materializationSources[buffer]];
++        for (std::uint32_t dword = 0; dword < descriptor.dwordCount && dword < descriptor.dwords.size(); ++dword) {
++            const auto* value = descriptor.dwords[dword] != nullptr ? descriptor.dwords[dword]->Resolve() : nullptr;
++            if (const auto user = userWordOf(plan, value); user && memo.passThrough[*user] != 0u) memo.bufferUserDwords[buffer].emplace_back(dword, *user);
++        }
++    }
++}
++
++struct RecordingContext {
++    const SrtRuntime* runtime = nullptr;
++    std::vector<MaterializeMemo::Call>* calls = nullptr;
++};
++
++bool recordRead(void* context, std::uint64_t address, std::uint32_t* value) {
++    auto& recording = *static_cast<RecordingContext*>(context);
++    const bool answer = recording.runtime->readMemory(recording.runtime->userContext, address, value);
++    recording.calls->push_back({0u, answer, address, 0u, answer ? *value : 0u});
++    return answer;
++}
++
++bool recordSpecializationRead(void* context, std::uint64_t address, std::uint32_t* value) {
++    auto& recording = *static_cast<RecordingContext*>(context);
++    const bool answer = recording.runtime->readSpecializationMemory(recording.runtime->userContext, address, value);
++    recording.calls->push_back({1u, answer, address, 0u, answer ? *value : 0u});
++    return answer;
++}
++
++bool recordProbe(void* context, std::uint64_t address, std::uint64_t bytes) {
++    auto& recording = *static_cast<RecordingContext*>(context);
++    const bool answer = recording.runtime->accessible(recording.runtime->userContext, address, bytes);
++    recording.calls->push_back({2u, answer, address, bytes, 0u});
++    return answer;
++}
++
++bool replay(const SrtRuntime& runtime, const std::vector<MaterializeMemo::Call>& calls) {
++    for (const auto& call : calls) {
++        std::uint32_t value = 0;
++        bool answer = false;
++        switch (call.kind) {
++        case 0u: answer = runtime.readMemory(runtime.userContext, call.address, &value); break;
++        case 1u: answer = runtime.readSpecializationMemory(runtime.userContext, call.address, &value); break;
++        default: answer = runtime.accessible(runtime.userContext, call.address, call.bytes); break;
++        }
++        if (answer != call.answer || (call.kind != 2u && answer && value != call.value)) return false;
++    }
++    return true;
++}
++
++void memoKey(const IrResourcePlan& plan, const MaterializeMemo& memo, const SrtRuntime& runtime, std::vector<std::uint32_t>& key) {
++    key.clear();
++    key.push_back(static_cast<std::uint32_t>(runtime.shaderBase));
++    key.push_back(static_cast<std::uint32_t>(runtime.shaderBase >> 32u));
++    key.push_back(static_cast<std::uint32_t>(runtime.userData.size()));
++    for (std::size_t user = 0; user < runtime.userData.size(); ++user) key.push_back(user < memo.passThrough.size() && memo.passThrough[user] != 0u ? 0u : runtime.userData[user]);
++    (void)plan;
++}
++
++}
++
+ void ResourceMaterializer::Materialize(const IrResourcePlan& program, const SrtRuntime& runtime, ResourceSnapshot& snapshot) const {
++    static const bool enabled = std::getenv("APS5_NO_MATERIALIZE_MEMO") == nullptr;
++    static const bool verify = std::getenv("APS5_VERIFY_MATERIALIZE_MEMO") != nullptr;
++    // A traced walk (pure flat slots) reports its reads into the trace as well; those stay walked.
++    if (!enabled || runtime.readTrace != nullptr || runtime.userData.size() < program.userDataCount) {
++        materializeWalked(program, runtime, snapshot);
++        return;
++    }
++    std::shared_ptr<MaterializeMemo> memo;
++    {
++        std::lock_guard lock(materializeMemoMutex());
++        if (program.materializeMemo == nullptr) {
++            auto made = std::make_shared<MaterializeMemo>();
++            analyzePassThrough(program, *made);
++            program.materializeMemo = std::move(made);
++        }
++        memo = program.materializeMemo;
++    }
++    thread_local std::vector<std::uint32_t> key;
++    memoKey(program, *memo, runtime, key);
++    std::vector<std::shared_ptr<const MaterializeMemo::Entry>> candidates;
++    {
++        std::lock_guard lock(materializeMemoMutex());
++        for (const auto& entry : memo->entries) {
++            if (entry->key == key) candidates.push_back(entry);
++        }
++    }
++    auto& counters = memoCounters();
++    for (const auto& entry : candidates) {
++        if (!replay(runtime, entry->calls)) {
++            counters.replayMismatches.fetch_add(1, std::memory_order_relaxed);
++            continue;
++        }
++        ResourceSnapshot hit = entry->snapshot;
++        hit.userData.assign(runtime.userData.begin(), runtime.userData.begin() + program.userDataCount);
++        for (const auto& patch : entry->patches) hit.buffers.at(patch.buffer).dwords.at(patch.dword) = runtime.userData[patch.user];
++        for (const auto& patch : entry->patches) {
++            const auto decoded = decodeBufferDescriptor(hit.buffers.at(patch.buffer));
++            if (decoded.Type() != 0u) throw std::runtime_error("buffer descriptor uses an unsupported type");
++            if (program.stage != IrShaderStage::Compute && decoded.AddTid()) throw std::runtime_error("buffer ADD_TID is only valid for compute shaders");
++        }
++        counters.hits.fetch_add(1, std::memory_order_relaxed);
++        if (verify) {
++            ResourceSnapshot walked;
++            materializeWalked(program, runtime, walked);
++            if (!(walked.buffers == hit.buffers && walked.images == hit.images && walked.samplers == hit.samplers && walked.flattenedSrt == hit.flattenedSrt && walked.userData == hit.userData && walked.uniformFill == hit.uniformFill && walked.nullRootReads == hit.nullRootReads && walked.srtPoison.size() == hit.srtPoison.size())) {
++                counters.verifyMismatches.fetch_add(1, std::memory_order_relaxed);
++                static std::atomic<int> reports{0};
++                if (reports.fetch_add(1) < 20) std::fprintf(stderr, "[materialize-memo] verify: a hit differs from the walk (shader 0x%llx, %zu patches)\n", static_cast<unsigned long long>(runtime.shaderBase), entry->patches.size());
++                snapshot = std::move(walked);
++                reportMemo();
++                return;
++            }
++        }
++        snapshot = std::move(hit);
++        reportMemo();
++        return;
++    }
++    // A key is recorded at its second sighting: most misses are draws whose user words hold
++    // per-draw pointers (never seen again), and recording, copying and evicting an entry for each
++    // ate what the hits saved. One table per thread; a slot holds the last key hash that fell in it.
++    {
++        std::uint64_t hash = reinterpret_cast<std::uintptr_t>(&program) * 0x9e3779b97f4a7c15ull;
++        for (const auto word : key) hash = (hash ^ word) * 0x100000001b3ull;
++        static thread_local std::vector<std::uint64_t> seen(std::size_t{1} << 16u);
++        auto& slot = seen[(hash * 0x9e3779b97f4a7c15ull) >> 48u];
++        if (slot != hash) {
++            slot = hash;
++            materializeWalked(program, runtime, snapshot);
++            counters.misses.fetch_add(1, std::memory_order_relaxed);
++            reportMemo();
++            return;
++        }
++    }
++    // Miss of a key seen before: walk with the callbacks recorded.
++    auto entry = std::make_shared<MaterializeMemo::Entry>();
++    RecordingContext recording{&runtime, &entry->calls};
++    SrtRuntime recorded = runtime;
++    recorded.userContext = &recording;
++    recorded.readMemory = runtime.readMemory != nullptr ? &recordRead : nullptr;
++    recorded.readSpecializationMemory = runtime.readSpecializationMemory != nullptr ? &recordSpecializationRead : nullptr;
++    recorded.accessible = runtime.accessible != nullptr ? &recordProbe : nullptr;
++    materializeWalked(program, recorded, snapshot);
++    counters.misses.fetch_add(1, std::memory_order_relaxed);
++    // A pass-through dword is patched only where the walk stored the word itself; a zero word (or a
++    // zeroed or inactive source) could not tell the two apart, so such snapshots stay unmemoized.
++    for (std::size_t buffer = 0; buffer < memo->bufferUserDwords.size(); ++buffer) {
++        for (const auto& [dword, user] : memo->bufferUserDwords[buffer]) {
++            if (buffer >= snapshot.buffers.size() || runtime.userData[user] == 0u || snapshot.buffers[buffer].dwords[dword] != runtime.userData[user]) {
++                counters.skipped.fetch_add(1, std::memory_order_relaxed);
++                reportMemo();
++                return;
++            }
++            entry->patches.push_back({static_cast<std::uint32_t>(buffer), dword, user});
++        }
++    }
++    entry->key = key;
++    entry->snapshot = snapshot;
++    {
++        std::lock_guard lock(materializeMemoMutex());
++        auto& entries = memo->entries;
++        entries.insert(entries.begin(), std::move(entry));
++        if (entries.size() > 8u) entries.pop_back();
++    }
++    reportMemo();
++}
++
++void ResourceMaterializer::materializeWalked(const IrResourcePlan& program, const SrtRuntime& runtime, ResourceSnapshot& snapshot) const {
+     const IrResourcePlan& plan = program;
+     if (!plan.resourceTrackingComplete) {
+         throw std::runtime_error("ResourceMaterializer::Materialize requires a completed resource plan");

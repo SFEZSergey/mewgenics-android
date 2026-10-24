@@ -1,0 +1,111 @@
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp b/core/libs/prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp
+index 02d308d..83f03ad 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp
+@@ -116,6 +116,7 @@ private:
+     static std::size_t drawCacheEntries();
+     void accountDrawVariant(const DispatchVariant& variant, bool added);
+     void insertDrawEntry(std::uint64_t key, std::vector<std::shared_ptr<DispatchVariant>>& fresh, std::shared_ptr<const DrawDecode> decode);
++    void insertDrawEntryLocked(std::uint64_t key, std::vector<std::shared_ptr<DispatchVariant>>& fresh, std::shared_ptr<const DrawDecode> decode, std::vector<std::shared_ptr<DrawEntry>>& doomed);
+     void eraseDrawEntry(std::uint64_t key, const std::shared_ptr<DrawEntry>& expected);
+     std::shared_ptr<const DrawRecipe> findDrawRecipe(std::uint64_t key, const std::vector<std::shared_ptr<DispatchVariant>>& stages, const std::vector<std::uint64_t>& shape);
+     void attachDrawRecipe(std::uint64_t key, const std::vector<std::shared_ptr<DispatchVariant>>& stages, const std::vector<std::uint64_t>& shape, std::shared_ptr<const DrawRecipe> recipe);
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawCache.cpp b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawCache.cpp
+index 8acab1e..e192f60 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawCache.cpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawCache.cpp
+@@ -1,10 +1,63 @@
+ #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
+ #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawCache.hpp"
+ #include <algorithm>
++#include <condition_variable>
++#include <iterator>
+ #include <cstdlib>
++#include <mutex>
++#include <thread>
++#include <utility>
+ 
+ namespace AgcDriver::DriverDetail {
+ 
++namespace {
++
++// Draw entries a newer copy displaced or the cache evicted die on this thread: freeing their
++// variants (recompile results, artifacts) and recipe records took a sixth of the queue worker,
++// under the cache mutex. APS5_NO_ENTRY_REAPER=1 frees them in place again.
++class EntryReaper {
++public:
++    static EntryReaper& Get() {
++        static auto* reaper = new EntryReaper();
++        return *reaper;
++    }
++    static bool Enabled() {
++        static const bool enabled = std::getenv("APS5_NO_ENTRY_REAPER") == nullptr;
++        return enabled;
++    }
++    void Release(std::vector<std::shared_ptr<DrawEntry>>& entries) {
++        if (entries.empty()) return;
++        {
++            std::lock_guard lock(mutex);
++            if (queued.empty()) queued.swap(entries);
++            else std::move(entries.begin(), entries.end(), std::back_inserter(queued));
++        }
++        entries.clear();
++        wake.notify_one();
++    }
++
++private:
++    EntryReaper() {
++        std::thread([this] { run(); }).detach();
++    }
++    void run() {
++        std::vector<std::shared_ptr<DrawEntry>> batch;
++        for (;;) {
++            {
++                std::unique_lock lock(mutex);
++                wake.wait(lock, [&] { return !queued.empty(); });
++                batch.swap(queued);
++            }
++            batch.clear();
++        }
++    }
++    std::mutex mutex;
++    std::condition_variable wake;
++    std::vector<std::shared_ptr<DrawEntry>> queued;
++};
++
++}
++
+ bool DrawRecipeRecord::Matches(const std::vector<std::shared_ptr<DispatchVariant>>& variants) const {
+     if (stages.size() != variants.size()) return false;
+     for (std::size_t i = 0; i < stages.size(); ++i) {
+@@ -57,6 +110,13 @@ void Driver::accountDrawVariant(const DispatchVariant& variant, bool added) {
+ }
+ 
+ void Driver::insertDrawEntry(std::uint64_t key, std::vector<std::shared_ptr<DispatchVariant>>& fresh, std::shared_ptr<const DrawDecode> decode) {
++    static thread_local std::vector<std::shared_ptr<DrawEntry>> doomed;
++    insertDrawEntryLocked(key, fresh, std::move(decode), doomed);
++    if (EntryReaper::Enabled()) EntryReaper::Get().Release(doomed);
++    else doomed.clear();
++}
++
++void Driver::insertDrawEntryLocked(std::uint64_t key, std::vector<std::shared_ptr<DispatchVariant>>& fresh, std::shared_ptr<const DrawDecode> decode, std::vector<std::shared_ptr<DrawEntry>>& doomed) {
+     std::lock_guard cacheLock(drawCacheMutex);
+     auto& counters = drawEntryCounters;
+     ++counters.inserts;
+@@ -95,7 +155,7 @@ void Driver::insertDrawEntry(std::uint64_t key, std::vector<std::shared_ptr<Disp
+     } else {
+         replacement->order = found->second->order;
+         drawOrder.splice(drawOrder.begin(), drawOrder, replacement->order);
+-        found->second = std::move(replacement);
++        doomed.push_back(std::exchange(found->second, std::move(replacement)));
+     }
+     while (drawCache.size() > drawCacheEntries()) {
+         const auto last = drawCache.find(drawOrder.back());
+@@ -103,6 +163,7 @@ void Driver::insertDrawEntry(std::uint64_t key, std::vector<std::shared_ptr<Disp
+             for (const auto& variant : variants) accountDrawVariant(*variant, false);
+         }
+         drawOrder.erase(last->second->order);
++        doomed.push_back(std::move(last->second));
+         drawCache.erase(last);
+         ++drawCacheEvictions;
+     }

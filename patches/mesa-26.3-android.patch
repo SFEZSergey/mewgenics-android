@@ -1,0 +1,333 @@
+diff --git a/src/freedreno/vulkan/tu_device.cc b/src/freedreno/vulkan/tu_device.cc
+index 4f15084..4a2dfd3 100644
+--- a/src/freedreno/vulkan/tu_device.cc
++++ b/src/freedreno/vulkan/tu_device.cc
+@@ -341,6 +341,8 @@ get_device_extensions(const struct tu_physical_device *device,
+       .EXT_extended_dynamic_state2 = true,
+       .EXT_extended_dynamic_state3 = true,
+       .EXT_external_memory_dma_buf = true,
++      .EXT_external_memory_host = device->instance->knl &&
++                                  device->instance->knl->bo_init_userptr,
+       .EXT_filter_cubic = device->info->props.has_tex_filter_cubic,
+       .EXT_fragment_density_map = true,
+       .EXT_fragment_density_map_offset = true,
+@@ -1184,6 +1186,9 @@ static void
+ tu_get_properties(struct tu_physical_device *pdevice,
+                   struct vk_properties *props)
+ {
++   /* VK_EXT_external_memory_host */
++   props->minImportedHostPointerAlignment = os_page_size;
++
+    /* Limits */
+    props->maxImageDimension1D = (1 << 14);
+    props->maxImageDimension2D = (1 << 14);
+@@ -3745,8 +3750,16 @@ tu_AllocateMemory(VkDevice _device,
+       vk_find_struct_const(pAllocateInfo->pNext,
+                            BUFFER_DEVICE_ADDRESS_ALIGNMENT_ALLOCATE_INFO_VALVE);
+    uint64_t alignment = align_info ? align_info->alignment : 0;
++   const VkImportMemoryHostPointerInfoEXT *host_ptr_info =
++      vk_find_struct_const(pAllocateInfo->pNext, IMPORT_MEMORY_HOST_POINTER_INFO_EXT);
+ 
+-   if (fd_info && fd_info->handleType) {
++   if (host_ptr_info && host_ptr_info->handleType) {
++      VkMemoryPropertyFlags mem_property =
++         device->physical_device->memory.types[pAllocateInfo->memoryTypeIndex];
++      result = tu_bo_init_userptr(device, &mem->bo,
++                                  pAllocateInfo->allocationSize, mem_property,
++                                  host_ptr_info->pHostPointer);
++   } else if (fd_info && fd_info->handleType) {
+       assert(fd_info->handleType ==
+                 VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT ||
+              fd_info->handleType ==
+@@ -4721,3 +4734,34 @@ tu_SetDebugUtilsObjectNameEXT(
+ 
+    return result;
+ }
++
++VKAPI_ATTR VkResult VKAPI_CALL
++tu_GetMemoryHostPointerPropertiesEXT(
++   VkDevice _device,
++   VkExternalMemoryHandleTypeFlagBits handleType,
++   const void *pHostPointer,
++   VkMemoryHostPointerPropertiesEXT *pMemoryHostPointerProperties)
++{
++   VK_FROM_HANDLE(tu_device, device, _device);
++
++   if (handleType != VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT ||
++       ((uintptr_t) pHostPointer & (os_page_size - 1)))
++      return vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
++
++   /* Imported user pages are CPU-cached: offer the cached coherent types
++    * (the GPU snoops the CPU caches), else the cached non-coherent ones.
++    */
++   const struct tu_physical_device *pdevice = device->physical_device;
++   const VkMemoryPropertyFlags coherent =
++      VK_MEMORY_PROPERTY_HOST_CACHED_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
++   uint32_t coherent_bits = 0, cached_bits = 0;
++   for (uint32_t i = 0; i < pdevice->memory.non_lazy_type_count; i++) {
++      if ((pdevice->memory.types[i] & coherent) == coherent)
++         coherent_bits |= 1u << i;
++      else if (pdevice->memory.types[i] & VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
++         cached_bits |= 1u << i;
++   }
++   pMemoryHostPointerProperties->memoryTypeBits =
++      coherent_bits ? coherent_bits : cached_bits;
++   return VK_SUCCESS;
++}
+diff --git a/src/freedreno/vulkan/tu_knl.cc b/src/freedreno/vulkan/tu_knl.cc
+index 37a9dbe..a45df65 100644
+--- a/src/freedreno/vulkan/tu_knl.cc
++++ b/src/freedreno/vulkan/tu_knl.cc
+@@ -114,6 +114,24 @@ tu_bo_init_dmabuf(struct tu_device *dev,
+    return VK_SUCCESS;
+ }
+ 
++VkResult
++tu_bo_init_userptr(struct tu_device *dev,
++                   struct tu_bo **bo,
++                   uint64_t size,
++                   VkMemoryPropertyFlags mem_property,
++                   void *host_ptr)
++{
++   if (!dev->instance->knl->bo_init_userptr)
++      return vk_error(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE);
++   VkResult result = dev->instance->knl->bo_init_userptr(dev, bo, size,
++                                                         mem_property, host_ptr);
++   if (result != VK_SUCCESS)
++      return result;
++   if (!(*bo)->unique_id)
++      (*bo)->unique_id = (*bo)->gem_handle;
++   return VK_SUCCESS;
++}
++
+ int
+ tu_bo_export_dmabuf(struct tu_device *dev, struct tu_bo *bo)
+ {
+@@ -148,7 +166,7 @@ tu_bo_map(struct tu_device *dev, struct tu_bo *bo, void *placed_addr)
+ VkResult
+ tu_bo_unmap(struct tu_device *dev, struct tu_bo *bo, bool reserve)
+ {
+-   if (!bo->map || bo->never_unmap)
++   if (!bo->map || bo->never_unmap || bo->host_ptr)
+       return VK_SUCCESS;
+ 
+    TU_RMV(bo_unmap, dev, bo);
+diff --git a/src/freedreno/vulkan/tu_knl.h b/src/freedreno/vulkan/tu_knl.h
+index 27f035f..18b343f 100644
+--- a/src/freedreno/vulkan/tu_knl.h
++++ b/src/freedreno/vulkan/tu_knl.h
+@@ -63,6 +63,10 @@ struct tu_bo {
+    bool never_unmap : 1;
+    bool cached_non_coherent : 1;
+    bool lazy : 1;
++   /* Imported through VK_EXT_external_memory_host: map points at the
++    * application's memory and must not be unmapped by the driver.
++    */
++   bool host_ptr : 1;
+ 
+    bool dump;
+ 
+@@ -144,6 +148,9 @@ struct tu_knl {
+                               uint64_t size, uint64_t align,
+                               enum tu_bo_alloc_flags flags, int prime_fd);
+    int (*bo_export_dmabuf)(struct tu_device *dev, struct tu_bo *bo);
++   VkResult (*bo_init_userptr)(struct tu_device *dev, struct tu_bo **out_bo,
++                               uint64_t size, VkMemoryPropertyFlags mem_property,
++                               void *host_ptr);
+    VkResult (*bo_alloc_lazy)(struct tu_device *dev, struct tu_bo *bo);
+    VkResult (*bo_map)(struct tu_device *dev, struct tu_bo *bo, void *placed_addr);
+    void (*bo_allow_dump)(struct tu_device *dev, struct tu_bo *bo);
+@@ -227,6 +234,13 @@ tu_bo_init_dmabuf(struct tu_device *dev,
+ int
+ tu_bo_export_dmabuf(struct tu_device *dev, struct tu_bo *bo);
+ 
++VkResult
++tu_bo_init_userptr(struct tu_device *dev,
++                   struct tu_bo **bo,
++                   uint64_t size,
++                   VkMemoryPropertyFlags mem_property,
++                   void *host_ptr);
++
+ void
+ tu_bo_finish(struct tu_device *dev, struct tu_bo *bo);
+ 
+diff --git a/src/freedreno/vulkan/tu_knl_kgsl.cc b/src/freedreno/vulkan/tu_knl_kgsl.cc
+index 5580ed8..3b5629a 100644
+--- a/src/freedreno/vulkan/tu_knl_kgsl.cc
++++ b/src/freedreno/vulkan/tu_knl_kgsl.cc
+@@ -448,6 +448,77 @@ kgsl_bo_init_dmabuf(struct tu_device *dev,
+    return VK_SUCCESS;
+ }
+ 
++/* VK_EXT_external_memory_host: KGSL pins the user pages and maps them into
++ * the GPU address space (KGSL_USER_MEM_TYPE_ADDR).
++ */
++static VkResult
++kgsl_bo_init_userptr(struct tu_device *dev,
++                     struct tu_bo **out_bo,
++                     uint64_t size,
++                     VkMemoryPropertyFlags mem_property,
++                     void *host_ptr)
++{
++   struct kgsl_gpuobj_import_useraddr import_useraddr = {
++      .virtaddr = (uintptr_t) host_ptr,
++   };
++   struct kgsl_gpuobj_import req = {
++      .priv = (uintptr_t)&import_useraddr,
++      .priv_len = size,
++      .flags = 0,
++      .type = KGSL_USER_MEM_TYPE_ADDR,
++   };
++
++   if ((mem_property & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) &&
++       (mem_property & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))
++      req.flags |= KGSL_MEMFLAGS_IOCOHERENT;
++   req.flags |= KGSL_CACHEMODE_WRITEBACK << KGSL_CACHEMODE_SHIFT;
++
++   int ret = safe_ioctl(dev->physical_device->local_fd,
++                        IOCTL_KGSL_GPUOBJ_IMPORT, &req);
++   if (ret && errno == EFAULT) {
++      /* Read-only pages can only be pinned for GPU reads. */
++      req.flags |= KGSL_MEMFLAGS_GPUREADONLY;
++      ret = safe_ioctl(dev->physical_device->local_fd,
++                       IOCTL_KGSL_GPUOBJ_IMPORT, &req);
++   }
++   if (ret)
++      return vk_errorf(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE,
++                       "Failed to import host pointer %p+0x%" PRIx64 " (%s)",
++                       host_ptr, size, strerror(errno));
++
++   struct kgsl_gpuobj_info info_req = {
++      .id = req.id,
++   };
++   ret = safe_ioctl(dev->physical_device->local_fd,
++                    IOCTL_KGSL_GPUOBJ_INFO, &info_req);
++   if (ret) {
++      struct kgsl_gpumem_free_id free_req = { .id = req.id };
++      safe_ioctl(dev->physical_device->local_fd, IOCTL_KGSL_GPUMEM_FREE_ID, &free_req);
++      return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
++                       "Failed to get host pointer import info (%s)",
++                       strerror(errno));
++   }
++
++   struct tu_bo* bo = tu_device_lookup_bo(dev, req.id);
++   assert(bo && bo->gem_handle == 0);
++
++   *bo = (struct tu_bo) {
++      .gem_handle = req.id,
++      .size = info_req.size,
++      .iova = info_req.gpuaddr,
++      .map = host_ptr,
++      .name = tu_debug_bos_add(dev, info_req.size, "host pointer"),
++      .refcnt = 1,
++      .shared_fd = -1,
++   };
++   bo->host_ptr = true;
++
++   tu_dump_bo_init(dev, bo);
++
++   *out_bo = bo;
++   return VK_SUCCESS;
++}
++
+ static int
+ kgsl_bo_export_dmabuf(struct tu_device *dev, struct tu_bo *bo)
+ {
+@@ -495,7 +566,7 @@ kgsl_bo_finish(struct tu_device *dev, struct tu_bo *bo)
+    tu_debug_bos_del(dev, bo);
+    tu_dump_bo_del(dev, bo);
+ 
+-   if (bo->map) {
++   if (bo->map && !bo->host_ptr) {
+       TU_RMV(bo_unmap, dev, bo);
+       munmap(bo->map, bo->size);
+    }
+@@ -1871,6 +1942,7 @@ static const struct tu_knl kgsl_knl_funcs = {
+       .bo_init = kgsl_bo_init,
+       .bo_init_dmabuf = kgsl_bo_init_dmabuf,
+       .bo_export_dmabuf = kgsl_bo_export_dmabuf,
++      .bo_init_userptr = kgsl_bo_init_userptr,
+       .bo_map = kgsl_bo_map,
+       .bo_allow_dump = kgsl_bo_allow_dump,
+       .bo_finish = kgsl_bo_finish,
+diff --git a/src/util/u_gralloc/u_gralloc_fallback.c b/src/util/u_gralloc/u_gralloc_fallback.c
+index 44fb32d..4255c95 100644
+--- a/src/util/u_gralloc/u_gralloc_fallback.c
++++ b/src/util/u_gralloc/u_gralloc_fallback.c
+@@ -154,6 +154,11 @@ fallback_gralloc_get_buffer_info(struct u_gralloc *gralloc,
+       bool ubwc = hnd->handle->data[hnd->handle->numFds + 1] & 0x08000000;
+       out->modifier = ubwc ? DRM_FORMAT_MOD_QCOM_COMPRESSED : DRM_FORMAT_MOD_LINEAR;
+    }
++   /* Unknown handle layout: swapchain buffers are requested with CPU usage (see
++    * vk_android.c), for which Qualcomm gralloc allocates linear memory.
++    */
++   if (out->modifier == DRM_FORMAT_MOD_INVALID)
++      out->modifier = DRM_FORMAT_MOD_LINEAR;
+ #endif
+ 
+    return 0;
+diff --git a/src/vulkan/runtime/vk_android.c b/src/vulkan/runtime/vk_android.c
+index 26dc74b..3c118f4 100644
+--- a/src/vulkan/runtime/vk_android.c
++++ b/src/vulkan/runtime/vk_android.c
+@@ -453,6 +453,12 @@ setup_gralloc0_usage(VkFormat format, VkImageUsageFlags image_usage,
+    if (!gralloc_usage)
+       return VK_ERROR_FORMAT_NOT_SUPPORTED;
+ 
++   /* AnyPS5 APK: the fallback gralloc path cannot read the layout of buffers from the
++    * current Qualcomm gralloc (no "gmsm" handle magic), so ask for CPU access: gralloc then
++    * allocates linear (non-UBWC) buffers, which is what the import assumes.
++    */
++   gralloc_usage |= GRALLOC_USAGE_SW_READ_OFTEN | GRALLOC_USAGE_SW_WRITE_OFTEN;
++
+    *out_gralloc_usage = gralloc_usage;
+ 
+    return VK_SUCCESS;
+@@ -658,6 +664,10 @@ vk_common_GetSwapchainGrallocUsage2ANDROID(
+       *grallocProducerUsage |= GRALLOC1_PRODUCER_USAGE_GPU_RENDER_TARGET;
+    if (gralloc_usage & GRALLOC_USAGE_HW_TEXTURE)
+       *grallocConsumerUsage |= GRALLOC1_CONSUMER_USAGE_GPU_TEXTURE;
++   if (gralloc_usage & GRALLOC_USAGE_SW_READ_OFTEN)
++      *grallocConsumerUsage |= GRALLOC1_CONSUMER_USAGE_CPU_READ_OFTEN;
++   if (gralloc_usage & GRALLOC_USAGE_SW_WRITE_OFTEN)
++      *grallocProducerUsage |= GRALLOC1_PRODUCER_USAGE_CPU_WRITE_OFTEN;
+ 
+    /* for front buffer rendering */
+    if (swapchainImageUsage & VK_SWAPCHAIN_IMAGE_USAGE_SHARED_BIT_ANDROID)
+diff --git a/src/freedreno/vulkan/tu_image.cc b/src/freedreno/vulkan/tu_image.cc
+--- a/src/freedreno/vulkan/tu_image.cc
++++ b/src/freedreno/vulkan/tu_image.cc
+@@ -9,6 +9,8 @@
+ 
+ #include "tu_image.h"
+ 
++#include <stdlib.h>
++
+ #include "drm-uapi/drm_fourcc.h"
+ 
+ #include "util/format/u_format.h"
+@@ -504,9 +506,22 @@
+    /* If there is no format list, we may have to assume that a
+     * UBWC-incompatible format may be used.
+     * TODO: limit based on compatiblity class
++    *
++    * TU_MUTABLE_UBWC=1: on GPUs whose UBWC layout is the same for every
++    * format (ubwc_all_formats_compatible), trust an application that only
++    * views a mutable image in formats of its own class that UBWC supports
++    * (the image format itself was already checked). AnyPS5 creates every
++    * guest surface mutable for its sRGB and reinterpreting views and passes
++    * no list, which otherwise leaves all of its render targets uncompressed.
+     */
+-   if (!fmt_list || !fmt_list->viewFormatCount)
+-      return false;
++   if (!fmt_list || !fmt_list->viewFormatCount) {
++      static const bool trust_mutable = [] {
++         const char *value = getenv("TU_MUTABLE_UBWC");
++         return value && value[0] == '1';
++      }();
++      return trust_mutable &&
++             dev->physical_device->info->props.ubwc_all_formats_compatible;
++   }
+ 
+    for (uint32_t i = 0; i < fmt_list->viewFormatCount; i++) {
+       if (!ubwc_possible(dev, fmt_list->pViewFormats[i],

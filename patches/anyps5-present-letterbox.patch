@@ -1,0 +1,93 @@
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp b/core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp
+index 6a588f8..29069eb 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp
+@@ -210,6 +210,10 @@ struct VulkanDevice::State {
+         std::vector<VkSemaphore> rendered;
+     };
+     std::vector<VkSemaphore> rendered;
++    // Per swapchain image: the source size (width << 32 | height) whose letterbox bars the image
++    // already holds; 0 = never cleared. The bars stay black between presents (the image is kept
++    // from PRESENT_SRC), so the full-image clear runs once per image and size, not every frame.
++    std::vector<std::uint64_t> letterboxed;
+     std::vector<RetiredSwapchain> retiredSwapchains;
+     VkPhysicalDeviceMemoryProperties memoryProperties{};
+     VkBuffer uploadBuffer = VK_NULL_HANDLE;
+@@ -1438,6 +1442,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
+         check(createFence(state->device, &fence, nullptr, &state->acquireFence), "vkCreateFence");
+         state->images.resize(imageCount);
+         state->rendered.resize(imageCount, VK_NULL_HANDLE);
++        state->letterboxed.assign(imageCount, 0);
+         VkCommandBufferAllocateInfo allocation{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+         allocation.commandPool = state->pool;
+         allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+@@ -2084,6 +2089,7 @@ void VulkanDevice::Resize(std::uint32_t width, std::uint32_t height) {
+         }
+         state->rendered.clear();
+         state->images.clear();
++        state->letterboxed.clear();
+         state->DestroyRetiredSwapchains();
+         state->InstanceFunction<PFN_vkDestroySurfaceKHR>("vkDestroySurfaceKHR")(state->instance, state->surface, nullptr);
+         state->surface = VK_NULL_HANDLE;
+@@ -2165,6 +2171,7 @@ void VulkanDevice::Resize(std::uint32_t width, std::uint32_t height) {
+     check(getImages(state->device, replacement, &count, state->images.data()), "vkGetSwapchainImagesKHR resize");
+     state->images.resize(count);
+     state->rendered.assign(count, VK_NULL_HANDLE);
++    state->letterboxed.assign(count, 0);
+     APS5_LOG_OUT_DEBUG("Resize complete swapchain=%p extent=%ux%u images=%u", reinterpret_cast<void*>(state->swapchain), state->extent.width, state->extent.height, count);
+ }
+ 
+@@ -2528,9 +2535,15 @@ bool VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
+         }
+         slot.blitBytes = static_cast<std::uint64_t>(state->extent.width) * state->extent.height * 4;
+     }
++    // APS5_PRESENT_CLEAR_ALWAYS=1: clear the whole swapchain image on every present (the old path).
++    static const bool clearAlways = std::getenv("APS5_PRESENT_CLEAR_ALWAYS") != nullptr;
++    if (state->letterboxed.size() != state->images.size()) state->letterboxed.assign(state->images.size(), 0);
++    const std::uint64_t letterboxKey = clearOnly ? 0 : (static_cast<std::uint64_t>(width) << 32 | height);
++    const bool keepBars = !clearAlways && letterboxKey != 0 && state->letterboxed[index] == letterboxKey;
++    state->letterboxed[index] = clearAlways ? 0 : letterboxKey;
+     VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+     barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+-    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++    barrier.oldLayout = keepBars ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_UNDEFINED;
+     barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+     barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+     barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+@@ -2574,20 +2587,22 @@ bool VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
+             if (uniform != nullptr) state->scaler->RecordClear(commands, *uniform);
+             else state->scaler->RecordUpload(commands, display != nullptr ? state->colorTransfer->LinearBuffer() : state->uploadBuffer);
+         }
+-        VkClearColorValue letterbox{};
+-        letterbox.float32[3] = 1.0f;
+-        state->DeviceFunction<PFN_vkCmdClearColorImage>("vkCmdClearColorImage")(commands, barrier.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &letterbox, 1, &barrier.subresourceRange);
+-        VkImageMemoryBarrier letterboxBarrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+-        letterboxBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+-        letterboxBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+-        letterboxBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+-        letterboxBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+-        letterboxBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+-        letterboxBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+-        letterboxBarrier.image = barrier.image;
+-        letterboxBarrier.subresourceRange = barrier.subresourceRange;
+-        pipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &letterboxBarrier);
+-        Graphics::Recorder::CountBarriers(CommandClass::PresentBlit);
++        if (!keepBars) {
++            VkClearColorValue letterbox{};
++            letterbox.float32[3] = 1.0f;
++            state->DeviceFunction<PFN_vkCmdClearColorImage>("vkCmdClearColorImage")(commands, barrier.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &letterbox, 1, &barrier.subresourceRange);
++            VkImageMemoryBarrier letterboxBarrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
++            letterboxBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
++            letterboxBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
++            letterboxBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
++            letterboxBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
++            letterboxBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++            letterboxBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++            letterboxBarrier.image = barrier.image;
++            letterboxBarrier.subresourceRange = barrier.subresourceRange;
++            pipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &letterboxBarrier);
++            Graphics::Recorder::CountBarriers(CommandClass::PresentBlit);
++        }
+         if (direct) PresentationScaler::RecordBlitFrom(graphicsContext(), commands, resident->Image(), VK_IMAGE_LAYOUT_GENERAL, width, height, residentFilter, barrier.image, state->extent.width, state->extent.height);
+         else state->scaler->RecordBlit(commands, barrier.image, state->extent.width, state->extent.height);
+         if (dumpFrame && direct) {

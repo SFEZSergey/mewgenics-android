@@ -1,0 +1,239 @@
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Memory/BufferFill.cpp b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Memory/BufferFill.cpp
+index d0b2593..be89929 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Memory/BufferFill.cpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/Driver/Memory/BufferFill.cpp
+@@ -9,6 +9,29 @@
+ #include <cstdlib>
+ #include <optional>
+ #include <cstring>
++#include <atomic>
++#include <cstdio>
++#include <cstdlib>
++#include <unistd.h>
++namespace {
++
++// Debug aid: APS5_TRACE_TARGET=<W>x<H> with APS5_TRACE_TARGET_TRIGGER=<file> prints, while the file
++// exists, every draw into a WxH color or depth target and every buffer fill (up to 4000 lines each).
++bool TargetTraceActive() {
++    static const char* trigger = std::getenv("APS5_TRACE_TARGET_TRIGGER");
++    static std::atomic<int> left{4000};
++    return trigger != nullptr && std::getenv("APS5_TRACE_TARGET") != nullptr && access(trigger, F_OK) == 0 && left.fetch_sub(1, std::memory_order_relaxed) > 0;
++}
++bool TargetTraceExtent(std::uint32_t width, std::uint32_t height) {
++    static const std::pair<unsigned, unsigned> wanted = [] {
++        unsigned w = 0, h = 0;
++        const char* text = std::getenv("APS5_TRACE_TARGET");
++        if (text == nullptr || std::sscanf(text, "%ux%u", &w, &h) != 2) return std::pair<unsigned, unsigned>{0u, 0u};
++        return std::pair<unsigned, unsigned>{w, h};
++    }();
++    return wanted.first != 0 && width == wanted.first && height == wanted.second;
++}
++}
+ 
+ namespace AgcDriver::DriverDetail {
+ 
+@@ -222,6 +245,7 @@ bool Driver::fillBuffer(QueueState& queue, std::uint32_t queueId, std::span<cons
+             }
+         }
+         phase(FillClearPhase);
++        if (TargetTraceActive()) std::fprintf(stderr, "[target] fill 0x%llx+0x%zx pattern %08x cover %d image 0x%llx %ux%u layer %u others %u cleared %d refusal %s\n", static_cast<unsigned long long>(base), bytes, pattern[0], static_cast<int>(coverage.cover), static_cast<unsigned long long>(coverage.image ? coverage.image->Descriptor().baseAddress : 0), coverage.image ? coverage.image->Descriptor().width : 0u, coverage.image ? coverage.image->Descriptor().height : 0u, static_cast<unsigned>(coverage.layer), static_cast<unsigned>(coverage.others), cleared ? 1 : 0, refusal ? refusal : "-");
+         fillClearCount(coverage, bytes, pattern, discarded, cleared, refusal);
+         noteForeignWriter(base, base + bytes, queueId);
+ 
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp b/core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp
+index 29069eb..e34fc7d 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp
+@@ -2940,10 +2940,35 @@ std::optional<std::string> VulkanDevice::KnownDrawRejection(const Graphics::Stat
+     return Graphics::KnownValidationFailure(graphicsContext(), shaders, graphics);
+ }
+ 
++namespace {
++
++// Debug aid: APS5_TRACE_TARGET=<W>x<H> with APS5_TRACE_TARGET_TRIGGER=<file> prints, while the file
++// exists, every draw into a WxH color or depth target and every buffer fill (up to 20000 lines in all).
++bool TargetTraceActive() {
++    static const char* trigger = std::getenv("APS5_TRACE_TARGET_TRIGGER");
++    static std::atomic<int> left{20000};
++    return trigger != nullptr && std::getenv("APS5_TRACE_TARGET") != nullptr && access(trigger, F_OK) == 0 && left.fetch_sub(1, std::memory_order_relaxed) > 0;
++}
++bool TargetTraceExtent(std::uint32_t width, std::uint32_t height) {
++    static const std::pair<unsigned, unsigned> wanted = [] {
++        unsigned w = 0, h = 0;
++        const char* text = std::getenv("APS5_TRACE_TARGET");
++        if (text == nullptr || std::sscanf(text, "%ux%u", &w, &h) != 2) return std::pair<unsigned, unsigned>{0u, 0u};
++        return std::pair<unsigned, unsigned>{w, h};
++    }();
++    return wanted.first != 0 && width == wanted.first && height == wanted.second;
++}
++}
++
+ void VulkanDevice::ColorMetadataPass(const Graphics::ColorMetadataPass& pass) {
++    for (const auto& target : pass.targets) {
++        if (TargetTraceExtent(target.extent.width, target.extent.height) && TargetTraceActive())
++            std::fprintf(stderr, "[target] metadata mode %d 0x%llx %ux%u mip %u/%u cmask 0x%llx dcc 0x%llx clear %08x %08x\n", static_cast<int>(pass.mode), static_cast<unsigned long long>(target.address), target.extent.width, target.extent.height, target.mip, target.mipCount, static_cast<unsigned long long>(target.cmaskAddress), static_cast<unsigned long long>(target.dccAddress), target.clearWords[0], target.clearWords[1]);
++    }
+     Graphics::RunColorMetadataPass(graphicsContext(), pass);
+ }
+ 
++
+ void VulkanDevice::Draw(const Graphics::State& graphics, const Pm4::DrawParameters& draw, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::shared_ptr<const DrawRecipe>* recipe) {
+     for (const auto& shader : shaders) {
+         require(shader.program != nullptr, "missing compiled shader");
+@@ -3678,6 +3703,15 @@ void VulkanDevice::recordDispatch(RecordedDispatch& record) {
+     recorder.Keep(record.resources);
+     if (record.resources != nullptr) recorder.KeepBytes(record.resources.get(), record.resources->CopiedBytes());
+     recordStep(PhaseRecordKeeps);
++    if (std::getenv("APS5_TRACE_TARGET") != nullptr && TargetTraceActive()) {
++        const auto& writes = resources.GpuWrites();
++        char ranges[256] = "";
++        std::size_t used = 0;
++        for (std::size_t i = 0; i < writes.size() && i < 4 && used < sizeof(ranges); ++i) used += static_cast<std::size_t>(std::snprintf(ranges + used, sizeof(ranges) - used, " 0x%llx+0x%llx", static_cast<unsigned long long>(writes[i].first), static_cast<unsigned long long>(writes[i].second - writes[i].first)));
++        std::size_t writtenImages = 0;
++        for (const auto& [image, written] : resources.StorageImages()) writtenImages += written ? 1u : 0u;
++        std::fprintf(stderr, "[target] dispatch writes %zu:%s images written %zu:%s\n", writes.size(), ranges, writtenImages, resources.DescribeWrittenImages().c_str());
++    }
+     if (record.dataRefresh != RecordedDispatch::DataRefresh::None) {
+         // The template's data buffers take this dispatch's words: a transfer write the pre-dispatch
+         // barrier makes visible (so it is recorded whatever the previous command covered), ordered
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp b/core/libs/prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp
+index e444ee0..19b3484 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp
+@@ -179,6 +179,8 @@ public:
+     const std::vector<std::pair<std::uint64_t, std::uint64_t>>& GpuWrites() const { return guestMemory.Writes(); }
+     std::vector<std::pair<std::uint64_t, std::uint64_t>> InPlaceReads() const { return guestMemory.InPlaceReads(); }
+     std::vector<std::pair<VkImage, bool>> StorageImages() const;
++    // Debug aid (APS5_TRACE_TARGET): " 0xADDR WxH mips=N" per written storage image.
++    std::string DescribeWrittenImages() const;
+     std::vector<std::pair<std::uint64_t, std::uint64_t>> DeviceReads() const { return guestMemory.DeviceReads(); }
+     bool ReadsImage(const StorageTexture* image) const;
+     const std::vector<std::uint32_t>& LayoutKey() const { return layoutKey; }
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp b/core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp
+index 3ab1de2..228bafc 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp
+@@ -34,6 +34,7 @@
+ #include <span>
+ #include <unordered_map>
+ #include <utility>
++#include <unistd.h>
+ 
+ namespace AgcDriver::Graphics {
+ 
+@@ -1740,7 +1741,40 @@ void captureInputs(const Context& context, Recorder& recorder, VkCommandBuffer c
+     });
+ }
+ 
++namespace {
++// Debug aid: APS5_TRACE_TARGET=<W>x<H> with APS5_TRACE_TARGET_TRIGGER=<file> prints, while the file
++// exists, every draw into a WxH color or depth target and every buffer fill (up to 4000 lines each).
++bool TargetTraceActive() {
++    static const char* trigger = std::getenv("APS5_TRACE_TARGET_TRIGGER");
++    static std::atomic<int> left{4000};
++    return trigger != nullptr && std::getenv("APS5_TRACE_TARGET") != nullptr && access(trigger, F_OK) == 0 && left.fetch_sub(1, std::memory_order_relaxed) > 0;
++}
++bool TargetTraceExtent(std::uint32_t width, std::uint32_t height) {
++    static const std::pair<unsigned, unsigned> wanted = [] {
++        unsigned w = 0, h = 0;
++        const char* text = std::getenv("APS5_TRACE_TARGET");
++        if (text == nullptr || std::sscanf(text, "%ux%u", &w, &h) != 2) return std::pair<unsigned, unsigned>{0u, 0u};
++        return std::pair<unsigned, unsigned>{w, h};
++    }();
++    return wanted.first != 0 && width == wanted.first && height == wanted.second;
++}
++}
++
+ void recordDraw(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, DrawInputs& inputs, RecordedDraw& record, DrawOutcome& outcome, DrawTimer& timer, double& ownWaitedMs) {
++    if ((state.hasColorTarget && TargetTraceExtent(state.color.extent.width, state.color.extent.height)) || (state.depth && TargetTraceExtent(state.depth->extent.width, state.depth->extent.height))) {
++        if (TargetTraceActive()) {
++            const auto& c = state.color;
++            const auto& b = state.blend;
++            std::fprintf(stderr, "[target] draw color=%d 0x%llx surf 0x%llx %ux%u mip %u/%u fmt %d tile %d cmask 0x%llx dcc 0x%llx | blend %d src %d/%d dst %d/%d op %d/%d mask 0x%x | depth %d 0x%llx test %d write %d cmp %d clear %.3f | stencil %d 0x%llx cmp %d fail %d pass %d zfail %d masks 0x%x/0x%x ref 0x%x | vp %.0f,%.0f %.0fx%.0f z %.2f-%.2f sc %d,%d %ux%u | idx %u inst %u rect %d topo %d\n",
++                state.hasColorTarget ? 1 : 0, static_cast<unsigned long long>(c.address), static_cast<unsigned long long>(c.surfaceAddress), c.extent.width, c.extent.height, c.mip, c.mipCount, static_cast<int>(c.format), static_cast<int>(c.tileMode), static_cast<unsigned long long>(c.cmaskAddress), static_cast<unsigned long long>(c.dccAddress),
++                b.blendEnable ? 1 : 0, static_cast<int>(b.srcColorBlendFactor), static_cast<int>(b.srcAlphaBlendFactor), static_cast<int>(b.dstColorBlendFactor), static_cast<int>(b.dstAlphaBlendFactor), static_cast<int>(b.colorBlendOp), static_cast<int>(b.alphaBlendOp), static_cast<unsigned>(b.colorWriteMask),
++                state.depth ? 1 : 0, static_cast<unsigned long long>(state.depth ? state.depth->address : 0), state.depthTest ? 1 : 0, state.depthWrite ? 1 : 0, static_cast<int>(state.depthCompare), state.depth ? state.depth->clearDepth : 0.0f,
++                state.stencilTest ? 1 : 0, static_cast<unsigned long long>(state.depth ? state.depth->stencilAddress : 0), static_cast<int>(state.stencilFront.compareOp), static_cast<int>(state.stencilFront.failOp), static_cast<int>(state.stencilFront.passOp), static_cast<int>(state.stencilFront.depthFailOp), state.stencilFront.compareMask, state.stencilFront.writeMask, state.stencilFront.reference,
++                state.viewport.x, state.viewport.y, state.viewport.width, state.viewport.height, state.viewport.minDepth, state.viewport.maxDepth, state.scissor.offset.x, state.scissor.offset.y, state.scissor.extent.width, state.scissor.extent.height,
++                draw.indexCount, draw.instanceCount, state.rectList ? 1 : 0, static_cast<int>(state.topology));
++        }
++    }
++
+     auto* recorder = record.recorder;
+     auto& resources = *record.resources;
+     const auto* args = record.indirect != nullptr ? record.indirect->args : nullptr;
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp b/core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp
+index a6fbd6a..c6fe940 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp
+@@ -3616,6 +3616,18 @@ std::vector<std::pair<VkImage, bool>> ShaderResources::StorageImages() const {
+     return images;
+ }
+ 
++std::string ShaderResources::DescribeWrittenImages() const {
++    std::string text;
++    for (std::size_t index = 0; index < storageTextures.size(); ++index) {
++        if (storageTextures[index] == nullptr || !storageWritten[index]) continue;
++        const auto& d = storageTextures[index]->Descriptor();
++        char line[96];
++        std::snprintf(line, sizeof(line), " 0x%llx %ux%u mips=%u", static_cast<unsigned long long>(d.baseAddress), d.width, d.height, d.mipCount);
++        text += line;
++    }
++    return text;
++}
++
+ bool ShaderResources::ReadsImage(const StorageTexture* image) const {
+     if (image == nullptr) return false;
+     for (const auto& texture : textures) {
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/src/Texture.cpp b/core/libs/prx/libSceAgcDriver/Graphics/src/Texture.cpp
+index 185c958..6ef1306 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/src/Texture.cpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/src/Texture.cpp
+@@ -17,6 +17,7 @@
+ #include <chrono>
+ #include <cmath>
+ #include <cstdio>
++#include <unistd.h>
+ #include <cstdint>
+ #include <cstring>
+ #include <cstdlib>
+@@ -3593,6 +3594,39 @@ bool StorageTexture::FillClear(std::span<const std::uint32_t, 4> pattern, std::u
+     if (trace && (descriptor.dccAddress != 0 || aliasedKeys) && traced.fetch_add(1) < 16) std::fprintf(stderr, "[fill-cover] clear of surface 0x%llx+0x%llx (format %u, keys 0x%llx%s): pattern %08x %08x %08x %08x\n", static_cast<unsigned long long>(descriptor.baseAddress), static_cast<unsigned long long>(guestBytes), descriptor.format, static_cast<unsigned long long>(descriptor.dccAddress), aliasedKeys ? ", another image over the memory has keys" : "", pattern[0], pattern[1], pattern[2], pattern[3]);
+     // A neighbour's results shadowed in the range's edge units reach the import before the stamp
+     // below makes those units stale (nothing for a 64 KiB-multiple surface).
++    // Debug aid: APS5_DUMP_CLEARED=<W>x<H>[,<W>x<H>...] with the APS5_TRACE_TARGET_TRIGGER file present saves
++    // mip 0 of a WxH image just before a fill clears it (what the previous use left there) as
++    // cleared_<address>_<n>.raw (u32 width, height, VkFormat, then rows); 24 dumps per run.
++    static const std::vector<std::pair<unsigned, unsigned>> dumpExtents = [] {
++        std::vector<std::pair<unsigned, unsigned>> extents;
++        const char* text = std::getenv("APS5_DUMP_CLEARED");
++        for (unsigned w = 0, h = 0, used = 0; text != nullptr && std::sscanf(text, "%ux%u%n", &w, &h, &used) == 2; text += used, text += *text == ',' ? 1 : 0) extents.emplace_back(w, h);
++        return extents;
++    }();
++    static const char* dumpTrigger = std::getenv("APS5_TRACE_TARGET_TRIGGER");
++    static std::atomic<int> clearedDumps{0};
++    if (std::find(dumpExtents.begin(), dumpExtents.end(), std::pair<unsigned, unsigned>{descriptor.width, descriptor.height}) != dumpExtents.end() && dumpTrigger != nullptr && access(dumpTrigger, F_OK) == 0 && clearedDumps.load() < 24) {
++        const auto dumpIndex = clearedDumps.fetch_add(1);
++        const auto texelBytes = static_cast<std::size_t>(BytesPerElement(descriptor.format));
++        Buffer dump(context, static_cast<std::size_t>(descriptor.width) * descriptor.height * texelBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
++        const auto dumpCommands = recorder->Commands();
++        RecordMemoryBarrier(context, dumpCommands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
++        VkBufferImageCopy copy{};
++        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
++        copy.imageExtent = {descriptor.width, descriptor.height, 1};
++        context.Function<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(dumpCommands, image, VK_IMAGE_LAYOUT_GENERAL, dump.Handle(), 1, &copy);
++        RecordMemoryBarrier(context, dumpCommands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
++        recorder->Sync();
++        char name[64];
++        std::snprintf(name, sizeof(name), "cleared_%llx_%d.raw", static_cast<unsigned long long>(descriptor.baseAddress), dumpIndex);
++        if (std::FILE* file = std::fopen(name, "wb")) {
++            const std::uint32_t header[3] = {descriptor.width, descriptor.height, static_cast<std::uint32_t>(storageFormat)};
++            std::fwrite(header, sizeof(header), 1, file);
++            std::fwrite(dump.Bytes().data(), 1, dump.Bytes().size(), file);
++            std::fclose(file);
++        }
++        std::fprintf(stderr, "[target] %s saved before the clear\n", name);
++    }
+     PublishShadow(begin, bytes, PublishScope::PartialUnits, PublishReason::FillClear);
+     GuestMemory::MarkWritten(begin, bytes);
+     const auto commands = recorder->Commands();

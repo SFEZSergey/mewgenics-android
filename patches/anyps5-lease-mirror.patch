@@ -1,0 +1,353 @@
+--- a/core/libs/prx/aps5native/CoreShim.cpp	2026-10-24 07:48:07.086537913 +0500
++++ b/core/libs/prx/aps5native/CoreShim.cpp	2026-10-24 07:48:07.094537913 +0500
+@@ -10,11 +10,16 @@
+ #include "prx/libkernel/AppMetadata/include/AppMetadata.hpp"
+ #include "prx/libkernel/Equeue/Equeue.hpp"
+ 
++#include <algorithm>
+ #include <array>
+ #include <atomic>
++#include <chrono>
+ #include <cstdio>
+ #include <cstdlib>
+ #include <exception>
++#include <limits>
++#include <map>
++#include <memory>
+ #include <mutex>
+ #include <stop_token>
+ #include <vector>
+@@ -77,30 +82,6 @@
+ 
+ bool (*nativePinWaiter)(std::uintptr_t, std::size_t) = nullptr;
+ 
+-// Снимок реестра, переиспользуемый, пока поколение реестра не изменилось: драйвер берёт снимок на
+-// каждую отрисовку (HostImportFor и др.), а полный снимок — переход в x86 и по выделению на диапазон.
+-std::mutex leaseCacheMutex;
+-GuestAllocations::Lease leaseCache;
+-std::uint64_t leaseCacheGeneration = ~std::uint64_t{0};
+-
+-bool dropLeaseCache() {
+-    GuestAllocations::Lease dropped;
+-    {
+-        std::lock_guard lock(leaseCacheMutex);
+-        dropped.swap(leaseCache);
+-        leaseCacheGeneration = ~std::uint64_t{0};
+-    }
+-    return !dropped.empty();
+-}
+-
+-bool pinWaiterFlushing(std::uintptr_t address, std::size_t bytes) {
+-    // Кэш снимка держит закрепления всех диапазонов: x86 ждёт освобождения — отпускаем его первым.
+-    const bool dropped = dropLeaseCache();
+-    // Сброшенные отложенные закрепления — уже продвижение: x86 перепроверит диапазон сразу.
+-    if (flushUnpins() || dropped) return true;
+-    return nativePinWaiter != nullptr && nativePinWaiter(address, bytes);
+-}
+-
+ // Снимок x86 (Lease в куче x86) как нативный Lease: у каждого элемента своё x86-закрепление,
+ // которое отпускается при последней нативной ссылке на этот диапазон; сам снимок отпускается сразу.
+ GuestAllocations::Lease adoptLease(void* lease) {
+@@ -120,6 +101,259 @@
+     return result;
+ }
+ 
++// Нативное зеркало реестра. Полный снимок x86 на каждый Acquire — ~2000 диапазонов, каждому новое
++// x86-закрепление через мост (в хабе Mewgenics до 40% потока игры). Зеркало закрепляет диапазон один
++// раз; изменения приходят через инвалидатор (x86 зовёт его под замком реестра, поэтому он только
++// записывает окно) и дочитываются окнами при следующем Acquire. Гость, освобождающий закреплённый
++// зеркалом диапазон, попадает в pin waiter: тот выбрасывает из зеркала только диапазоны, пересекающие
++// освобождаемый кусок (прежний кэш APS5_LEASE_CACHE выбрасывал всё и тянул полный снимок заново:
++// титульник 60 -> 20 FPS). APS5_NO_LEASE_MIRROR=1 — снимок x86 на каждый Acquire, как раньше.
++bool leaseMirrorEnabled() {
++    static const bool enabled = std::getenv("APS5_NO_LEASE_MIRROR") == nullptr;
++    return enabled;
++}
++
++using RangeRef = std::shared_ptr<const GuestAllocations::Range>;
++using Span = std::pair<std::uint64_t, std::uint64_t>; // [begin, end)
++
++constexpr std::size_t MirrorDirtyLimit = 16384; // больше записей — полное перечитывание
++constexpr std::size_t MirrorWindowLimit = 64;   // больше окон после слияния — тоже
++
++struct LeaseMirror {
++    // Замки: dirtyMutex берётся инвалидатором под замком реестра x86 и не держится ни через что;
++    // updateMutex — один обновляющий, держится через вызовы x86; mutex — зеркало и снимок, никогда
++    // не держится через вызовы x86.
++    std::mutex dirtyMutex;
++    std::vector<Span> dirty;
++    bool overflow = false;
++    int updating = 0;
++    std::mutex updateMutex;
++    std::mutex mutex;
++    std::atomic<bool> built{false};
++    std::map<std::uint64_t, RangeRef> ranges;
++    GuestAllocations::Lease snapshot;
++    bool snapshotValid = false;
++    std::atomic<std::uint64_t> acquires{0};
++    std::atomic<std::uint64_t> fast{0};
++    std::atomic<std::uint64_t> windows{0};
++    std::atomic<std::uint64_t> rebuilds{0};
++    std::atomic<std::uint64_t> waiterDrops{0};
++    std::atomic<std::int64_t> reportedAt{0};
++};
++
++LeaseMirror& mirror() {
++    static auto& value = *new LeaseMirror();
++    return value;
++}
++
++std::atomic<void (*)(std::uintptr_t, std::size_t)> driverInvalidator{nullptr};
++
++std::uint64_t spanEnd(std::uint64_t address, std::uint64_t bytes) {
++    return bytes > std::numeric_limits<std::uint64_t>::max() - address ? std::numeric_limits<std::uint64_t>::max() : address + bytes;
++}
++
++void noteDirty(std::uint64_t begin, std::uint64_t end) {
++    auto& m = mirror();
++    std::lock_guard lock(m.dirtyMutex);
++    if (m.dirty.size() >= MirrorDirtyLimit) m.overflow = true;
++    else m.dirty.emplace_back(begin, end);
++}
++
++void mirrorInvalidate(std::uintptr_t address, std::size_t bytes) {
++    noteDirty(address, spanEnd(address, bytes));
++    if (const auto callback = driverInvalidator.load(std::memory_order_acquire)) callback(address, bytes);
++}
++
++void installMirrorInvalidator() {
++    static std::once_flag once;
++    std::call_once(once, [] { x86(Aps5Native::SetInvalidator, arg(&mirrorInvalidate)); });
++}
++
++// Диапазоны зеркала, которые x86 считает пересекающими [address, end) (как в RequireUnpinned).
++template <class Visit>
++void forOverlapping(std::map<std::uint64_t, RangeRef>& ranges, std::uint64_t address, std::uint64_t end, Visit visit) {
++    auto it = ranges.upper_bound(address);
++    if (it != ranges.begin()) --it;
++    while (it != ranges.end() && (it->first < end || it->first == address)) {
++        const auto base = it->first;
++        const auto next = std::next(it);
++        if ((address < spanEnd(base, it->second->bytes) && base < end) || base == address) visit(it);
++        it = next;
++    }
++}
++
++void mirrorRebuild() {
++    auto& m = mirror();
++    auto lease = adoptLease(reinterpret_cast<void*>(x86(Aps5Native::LeaseAcquire)));
++    std::map<std::uint64_t, RangeRef> fresh;
++    for (auto& range : lease) fresh.emplace(range->address, std::move(range));
++    std::map<std::uint64_t, RangeRef> old;
++    GuestAllocations::Lease oldSnapshot;
++    {
++        std::lock_guard lock(m.mutex);
++        old.swap(m.ranges);
++        m.ranges.swap(fresh);
++        oldSnapshot.swap(m.snapshot);
++        m.snapshotValid = false;
++    }
++    m.built.store(true, std::memory_order_release);
++    m.rebuilds.fetch_add(1, std::memory_order_relaxed);
++}
++
++// Перечитывает окно: растит его, пока оно не накроет и всё, что вернул x86, и все пересекающиеся
++// записи зеркала, затем заменяет записи окна ответом x86. false — окно не сошлось.
++bool mirrorRefresh(std::uint64_t begin, std::uint64_t end) {
++    auto& m = mirror();
++    for (int round = 0; round < 8; ++round) {
++        auto lease = adoptLease(reinterpret_cast<void*>(x86(Aps5Native::LeaseAcquireWindow, begin, end)));
++        m.windows.fetch_add(1, std::memory_order_relaxed);
++        auto grownBegin = begin;
++        auto grownEnd = end;
++        for (const auto& range : lease) {
++            grownBegin = std::min<std::uint64_t>(grownBegin, range->address);
++            grownEnd = std::max(grownEnd, spanEnd(range->address, range->bytes));
++        }
++        std::vector<RangeRef> dropped;
++        GuestAllocations::Lease oldSnapshot;
++        {
++            std::lock_guard lock(m.mutex);
++            forOverlapping(m.ranges, grownBegin, grownEnd, [&](auto it) {
++                grownBegin = std::min(grownBegin, it->first);
++                grownEnd = std::max(grownEnd, spanEnd(it->first, it->second->bytes));
++            });
++            if (grownBegin != begin || grownEnd != end) {
++                begin = grownBegin;
++                end = grownEnd;
++                continue;
++            }
++            forOverlapping(m.ranges, begin, end, [&](auto it) {
++                dropped.push_back(std::move(it->second));
++                m.ranges.erase(it);
++            });
++            for (auto& range : lease) m.ranges.insert_or_assign(range->address, std::move(range));
++            oldSnapshot.swap(m.snapshot);
++            m.snapshotValid = false;
++        }
++        return true;
++    }
++    return false;
++}
++
++void mirrorReport() {
++    auto& m = mirror();
++    const auto now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
++    auto last = m.reportedAt.load(std::memory_order_relaxed);
++    if (last == 0) {
++        m.reportedAt.compare_exchange_strong(last, now);
++        return;
++    }
++    if (now - last < 10 || !m.reportedAt.compare_exchange_strong(last, now)) return;
++    std::size_t held = 0;
++    {
++        std::lock_guard lock(m.mutex);
++        held = m.ranges.size();
++    }
++    std::fprintf(stderr, "[lease-mirror] 10 s: %llu acquires (%llu without changes), %llu windows read, %llu full reads, %llu ranges dropped for the guest; %zu ranges held\n",
++        static_cast<unsigned long long>(m.acquires.exchange(0)), static_cast<unsigned long long>(m.fast.exchange(0)), static_cast<unsigned long long>(m.windows.exchange(0)),
++        static_cast<unsigned long long>(m.rebuilds.exchange(0)), static_cast<unsigned long long>(m.waiterDrops.exchange(0)), held);
++}
++
++GuestAllocations::Lease mirrorSnapshot() {
++    auto& m = mirror();
++    std::lock_guard lock(m.mutex);
++    if (!m.snapshotValid) {
++        m.snapshot.clear();
++        m.snapshot.reserve(m.ranges.size());
++        for (const auto& [address, range] : m.ranges) m.snapshot.push_back(range);
++        m.snapshotValid = true;
++    }
++    return m.snapshot;
++}
++
++GuestAllocations::Lease mirrorAcquire() {
++    auto& m = mirror();
++    m.acquires.fetch_add(1, std::memory_order_relaxed);
++    mirrorReport();
++    bool current = false;
++    if (m.built.load(std::memory_order_acquire)) {
++        std::lock_guard lock(m.dirtyMutex);
++        current = m.dirty.empty() && !m.overflow && m.updating == 0;
++    }
++    if (current) {
++        m.fast.fetch_add(1, std::memory_order_relaxed);
++    } else {
++        installMirrorInvalidator();
++        std::lock_guard update(m.updateMutex);
++        std::vector<Span> dirty;
++        bool overflow = false;
++        {
++            std::lock_guard lock(m.dirtyMutex);
++            dirty.swap(m.dirty);
++            overflow = m.overflow;
++            m.overflow = false;
++            ++m.updating;
++        }
++        try {
++            std::sort(dirty.begin(), dirty.end());
++            std::vector<Span> merged;
++            for (const auto& span : dirty) {
++                if (!merged.empty() && span.first <= merged.back().second) merged.back().second = std::max(merged.back().second, span.second);
++                else merged.push_back(span);
++            }
++            bool rebuild = !m.built.load(std::memory_order_acquire) || overflow || merged.size() > MirrorWindowLimit;
++            for (std::size_t i = 0; !rebuild && i < merged.size(); ++i) rebuild = !mirrorRefresh(merged[i].first, merged[i].second);
++            if (rebuild) mirrorRebuild();
++        } catch (...) {
++            std::lock_guard lock(m.dirtyMutex);
++            --m.updating;
++            m.overflow = true;
++            throw;
++        }
++        std::lock_guard lock(m.dirtyMutex);
++        --m.updating;
++    }
++    return mirrorSnapshot();
++}
++
++// Pin waiter: выбрасывает из зеркала диапазоны, пересекающие [address, address + bytes); они
++// дочитаются при следующем Acquire. true — что-то выброшено; shared — у выброшенного остались другие
++// владельцы (снимки у драйвера), то есть закрепление само не уйдёт.
++bool mirrorDrop(std::uintptr_t address, std::size_t bytes, bool& shared) {
++    auto& m = mirror();
++    const auto end = spanEnd(address, bytes);
++    std::vector<RangeRef> dropped;
++    GuestAllocations::Lease oldSnapshot;
++    {
++        std::lock_guard lock(m.mutex);
++        forOverlapping(m.ranges, address, end, [&](auto it) {
++            dropped.push_back(std::move(it->second));
++            m.ranges.erase(it);
++        });
++        if (dropped.empty()) return false;
++        // Снимок держит копии выброшенных: без него они остались бы закреплены.
++        oldSnapshot.swap(m.snapshot);
++        m.snapshotValid = false;
++    }
++    oldSnapshot.clear();
++    for (const auto& range : dropped) {
++        noteDirty(range->address, spanEnd(range->address, range->bytes));
++        if (range.use_count() != 1) shared = true;
++    }
++    m.waiterDrops.fetch_add(dropped.size(), std::memory_order_relaxed);
++    return true;
++}
++
++bool pinWaiterFlushing(std::uintptr_t address, std::size_t bytes) {
++    // Зеркало держит закрепления: x86 ждёт освобождения — отпускаем его диапазоны первыми.
++    bool shared = false;
++    const bool dropped = leaseMirrorEnabled() && mirrorDrop(address, bytes, shared);
++    // Сброшенные отложенные закрепления — уже продвижение: x86 перепроверит диапазон сразу. Если
++    // выброшенное держат снимки драйвера, продвижения не будет: ждём их работу, как без зеркала
++    // (иначе зеркало, дочитав диапазон снова, крутило бы гостя по кругу).
++    if ((flushUnpins() || dropped) && !shared) return true;
++    return nativePinWaiter != nullptr && nativePinWaiter(address, bytes);
++}
++
+ void (*registeredShutdown[8])() = {};
+ int registeredShutdownCount = 0;
+ 
+@@ -220,25 +454,8 @@
+ 
+ namespace GuestAllocations {
+ extern "C" Lease GuestAllocationsAcquire_nid_postfix() {
+-    // Опыт: кэш держит закрепления всех диапазонов, и x86-ядро ждёт их при каждом освобождении памяти
+-    // гостя (титульник 60 -> 20 FPS). Оставлен выключенным: APS5_LEASE_CACHE=1 — включить.
+-    static const bool cached = std::getenv("APS5_LEASE_CACHE") != nullptr;
+-    if (!cached) return adoptLease(reinterpret_cast<void*>(x86(Aps5Native::LeaseAcquire)));
+-    // Поколение читается до снимка: изменение между ними даст новый ключ и новый снимок при следующем вызове.
+-    const auto generation = GuestAllocationsGeneration_nid_postfix();
+-    {
+-        std::lock_guard lock(leaseCacheMutex);
+-        if (generation == leaseCacheGeneration) return leaseCache;
+-    }
+-    auto lease = adoptLease(reinterpret_cast<void*>(x86(Aps5Native::LeaseAcquire)));
+-    GuestAllocations::Lease previous;
+-    {
+-        std::lock_guard lock(leaseCacheMutex);
+-        previous.swap(leaseCache);
+-        leaseCache = lease;
+-        leaseCacheGeneration = generation;
+-    }
+-    return lease;
++    if (leaseMirrorEnabled()) return mirrorAcquire();
++    return adoptLease(reinterpret_cast<void*>(x86(Aps5Native::LeaseAcquire)));
+ }
+ extern "C" Lease GuestAllocationsAcquireWindow_nid_postfix(std::uintptr_t begin, std::uintptr_t end) {
+     return adoptLease(reinterpret_cast<void*>(x86(Aps5Native::LeaseAcquireWindow, begin, end)));
+@@ -251,7 +468,13 @@
+     return x86(Aps5Native::GuestAllocationsGeneration);
+ }
+ extern "C" void GuestAllocationsSetInvalidator_nid_postfix(void (*callback)(std::uintptr_t address, std::size_t bytes)) {
+-    x86(Aps5Native::SetInvalidator, arg(callback));
++    if (!leaseMirrorEnabled()) {
++        x86(Aps5Native::SetInvalidator, arg(callback));
++        return;
++    }
++    // Инвалидатор x86 один: зеркало стоит в нём само и передаёт вызовы драйверу.
++    driverInvalidator.store(callback, std::memory_order_release);
++    installMirrorInvalidator();
+ }
+ extern "C" void GuestAllocationsSetPinWaiter_nid_postfix(bool (*callback)(std::uintptr_t address, std::size_t bytes)) {
+     nativePinWaiter = callback;
