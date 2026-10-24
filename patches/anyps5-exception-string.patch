@@ -1,0 +1,27 @@
+diff --git a/core/libs/prx/libkernel/System/src/Coredump.cpp b/core/libs/prx/libkernel/System/src/Coredump.cpp
+index 767371123..4637a4d0b 100644
+--- a/core/libs/prx/libkernel/System/src/Coredump.cpp
++++ b/core/libs/prx/libkernel/System/src/Coredump.cpp
+@@ -27,6 +27,22 @@ int APS5_VABI sceCoredumpUnregisterCoredumpHandler(void) {
+ int APS5_VABI sceKernelDebugWriteCppExceptionInfo(const void* exception, uint64_t unknown, const char* typeName, const char* what) {
+     (void)unknown;
+     std::fprintf(stderr, "[coredump] uncaught C++ exception %p of type %s%s%s\n", exception, typeName ? typeName : "(unknown)", what ? ", what(): " : "", what ? what : "");
++    // A thrown std::string (titles do that) carries the message itself: print it (libc++ layout,
++    // short: size<<1 in byte 0, text from byte 1; long: capacity|1, size, pointer).
++    if (exception && typeName && __builtin_strstr(typeName, "basic_string")) {
++        const auto* bytes = static_cast<const unsigned char*>(exception);
++        const char* text = nullptr;
++        size_t size = 0;
++        if ((bytes[0] & 1) == 0) {
++            size = bytes[0] >> 1;
++            text = reinterpret_cast<const char*>(bytes + 1);
++        } else {
++            const auto* words = static_cast<const uint64_t*>(exception);
++            size = static_cast<size_t>(words[1]);
++            text = reinterpret_cast<const char*>(words[2]);
++        }
++        if (text && size < 4096) std::fprintf(stderr, "[coredump] exception text: %.*s\n", static_cast<int>(size), text);
++    }
+     return 0;
+ }
+ 

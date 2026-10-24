@@ -19,9 +19,14 @@
 extern SDL_GPUBootstrap VulkanDriver;
 
 static SDL_GPUDevice real;
+static bool tracing;       // APS5_SDLGPU_TRACE=1: pass shapes, viewports, scissors, pipelines, uploads in the log
+static bool targetMipsOn;  // APS5_SDLGPU_TARGET_MIPS=1
 static SDL_GPUTexture *tableTexture;  // bitmap_atlas_info, see noteTableTexture
 static SDL_GPUBuffer *tableBuffer;
 static Uint32 tableBytes;
+static SDL_GPUCommandBuffer *tableBoundCb;  // where the mirror was last bound (see L_BindVertexStorageTextures)
+static Uint64 tableBoundPass, passGeneration;
+static SDL_GPUBuffer *tableBoundBuffer;
 static char shaderDir[512] = "sdlgpu";
 
 typedef struct MappedShader
@@ -239,7 +244,7 @@ static void dumpCounts(void)
 {
     static Uint64 last;
     static int enabled = -1;
-    if (enabled < 0) { const char *v = getenv("APS5_SDLGPU_COUNTS"); enabled = !(v && *v == '0'); }
+    if (enabled < 0) enabled = countCalls;
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     const Uint64 now = (Uint64)ts.tv_sec;
@@ -470,8 +475,16 @@ static uint64_t L_BindVertexStorageTextures(uint64_t a0, uint64_t a1, uint64_t a
         }
         if (b) buffers[bound++] = (SDL_GPUBuffer *)items[i];
     }
-    if (bound) real.BindVertexStorageBuffers(cb, (Uint32)a1, buffers, bound);
-    else if (tableBuffer) real.BindVertexStorageBuffers(cb, 0, &tableBuffer, 1);
+    if (bound) {
+        real.BindVertexStorageBuffers(cb, (Uint32)a1, buffers, bound);
+        tableBoundCb = NULL;
+    } else if (tableBuffer && (tableBoundCb != cb || tableBoundPass != passGeneration || tableBoundBuffer != tableBuffer)) {
+        // Once per render pass (SDL clears the bindings when a pass ends); the title asks before every draw.
+        real.BindVertexStorageBuffers(cb, 0, &tableBuffer, 1);
+        tableBoundCb = cb;
+        tableBoundPass = passGeneration;
+        tableBoundBuffer = tableBuffer;
+    }
     return 0;
 }
 
@@ -531,8 +544,8 @@ static void uploadTexture(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3)
     const KnownTexture *t = findTexture(region.texture);
     static struct { void *texture; Uint32 mip; } seen[1024];
     static int seenCount;
-    bool fresh = true;
-    for (int i = 0; i < seenCount; ++i)
+    bool fresh = tracing;
+    for (int i = 0; fresh && i < seenCount; ++i)
         if (seen[i].texture == region.texture && seen[i].mip == region.mip_level) { fresh = false; break; }
     if (fresh && seenCount < 1024) { seen[seenCount].texture = region.texture; seen[seenCount].mip = region.mip_level; ++seenCount; }
     if (fresh && reports < 400) {
@@ -837,6 +850,7 @@ static SDL_Mutex *mipLock;
 
 static uint64_t L_BeginRenderPass(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3)
 {
+    ++passGeneration;
     {
         const SDL_GPUColorTargetInfo *targets = (const SDL_GPUColorTargetInfo *)(uintptr_t)a1;
         SDL_GPUCommandBuffer *cb = (SDL_GPUCommandBuffer *)(uintptr_t)a0;
@@ -855,7 +869,7 @@ static uint64_t L_BeginRenderPass(uint64_t a0, uint64_t a1, uint64_t a2, uint64_
         }
         SDL_UnlockMutex(mipLock);
     }
-    {
+    if (tracing) {
         const SDL_GPUColorTargetInfo *c = (const SDL_GPUColorTargetInfo *)(uintptr_t)a1;
         const SDL_GPUDepthStencilTargetInfo *d = (const SDL_GPUDepthStencilTargetInfo *)(uintptr_t)a3;
         char text[512] = "";
@@ -1050,11 +1064,11 @@ static uint64_t L_CreateTexture(uint64_t a0, uint64_t a1)
     rememberTexture((SDL_GPUTexture *)(uintptr_t)texture, info);
     noteAtlas((SDL_GPUTexture *)(uintptr_t)texture, info);
     zeroTexture((SDL_GPURenderer *)(uintptr_t)a0, (SDL_GPUTexture *)(uintptr_t)texture, info);
-    if (texture && (info->usage & SDL_GPU_TEXTUREUSAGE_COLOR_TARGET))
+    if (texture && (info->usage & SDL_GPU_TEXTUREUSAGE_COLOR_TARGET))  // sesscap tells hub/combat by these
         fprintf(stderr, "[sdlgpu] target %ux%u format %d levels %u layers %u\n", info->width, info->height, (int)info->format, info->num_levels, info->layer_count_or_depth);
     noteTableTexture((SDL_GPURenderer *)(uintptr_t)a0, (SDL_GPUTexture *)(uintptr_t)texture, info);
     static int reports;
-    if (reports < 60) {
+    if (tracing && reports < 60) {
         ++reports;
         fprintf(stderr, "[sdlgpu] texture %p: type %d format %d usage 0x%x %ux%ux%u levels %u\n", (void *)(uintptr_t)texture, (int)info->type, (int)info->format,
                 (unsigned)info->usage, info->width, info->height, info->layer_count_or_depth, info->num_levels);
@@ -1077,28 +1091,46 @@ static void installOverrides(SDL_GPUDevice *device)
         device->SubmitAndAcquireFence = (void *)L_SubmitAndAcquireFence;
         device->Cancel = (void *)L_Cancel;
     }
+    // Fixes (always): zero-init + bitmap_atlas_info table, aligned uploads, in-place writes.
     device->CreateTexture = (void *)L_CreateTexture;
     device->BindVertexStorageTextures = (void *)L_BindVertexStorageTextures;
     device->CreateBuffer = (void *)L_CreateBuffer;
     device->UploadToTexture = (void *)L_UploadToTexture;
-    device->CopyTextureToTexture = (void *)L_CopyTextureToTexture;
-    device->CreateShader = (void *)L_CreateShader;
-    device->CreateGraphicsPipeline = (void *)L_CreateGraphicsPipeline;
     device->BeginRenderPass = (void *)L_BeginRenderPass;
-    device->SetViewport = (void *)L_SetViewport;
-    device->SetScissor = (void *)L_SetScissor;
-    device->GenerateMipmaps = (void *)L_GenerateMipmaps;
     device->Blit = (void *)L_Blit;
     device->MapTransferBuffer = (void *)L_MapTransferBuffer;
-    device->BindGraphicsPipeline = (void *)L_BindGraphicsPipeline;
-    device->CreateSampler = (void *)L_CreateSampler;
-    device->BindFragmentSamplers = (void *)L_BindFragmentSamplers;
-    device->DrawIndexedPrimitives = (void *)L_DrawIndexedPrimitives;
-    device->DrawPrimitives = (void *)L_DrawPrimitives;
     cycleWrites = getenv("APS5_SDLGPU_CYCLE") != NULL;
+    // Diagnostics and experiments: only when asked for (a bridge per call costs CPU).
+    const char *v = getenv("APS5_SDLGPU_COUNTS");
+    countCalls = v && *v == '1';
+    v = getenv("APS5_SDLGPU_TRACE");
+    tracing = v && *v == '1';
+    targetMipsOn = getenv("APS5_SDLGPU_TARGET_MIPS") != NULL;
+    v = getenv("APS5_SDLGPU_UPLOADED_LOD0");
+    const bool lod0 = v && *v == '1';
+    const bool shaderSwitches = getenv("APS5_SDLGPU_SKIP_FS") || getenv("APS5_SDLGPU_NEAREST_FS");
     if (!mipLock) mipLock = SDL_CreateMutex();
-    if (getenv("APS5_SDLGPU_TARGET_MIPS") != NULL) device->EndRenderPass = (void *)L_EndRenderPass;  // experiment (washes images out)
-    device->BindVertexSamplers = (void *)L_BindVertexSamplers;
+    if (targetMipsOn) device->EndRenderPass = (void *)L_EndRenderPass;  // experiment (washes images out)
+    if (tracing || targetMipsOn) device->CopyTextureToTexture = (void *)L_CopyTextureToTexture;
+    if (tracing || shaderSwitches) {
+        device->CreateShader = (void *)L_CreateShader;
+        device->CreateGraphicsPipeline = (void *)L_CreateGraphicsPipeline;
+    }
+    if (tracing) {
+        device->SetViewport = (void *)L_SetViewport;
+        device->SetScissor = (void *)L_SetScissor;
+        device->GenerateMipmaps = (void *)L_GenerateMipmaps;
+    }
+    if (shaderSwitches) {
+        device->BindGraphicsPipeline = (void *)L_BindGraphicsPipeline;
+        device->DrawIndexedPrimitives = (void *)L_DrawIndexedPrimitives;
+        device->DrawPrimitives = (void *)L_DrawPrimitives;
+    }
+    if (shaderSwitches || lod0) {
+        device->CreateSampler = (void *)L_CreateSampler;
+        device->BindFragmentSamplers = (void *)L_BindFragmentSamplers;
+        device->BindVertexSamplers = (void *)L_BindVertexSamplers;
+    }
 }
 
 EXPORT void Aps5SdlGpu_SetShaderDir(const char *dir)

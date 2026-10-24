@@ -379,7 +379,7 @@ index 35895a1..d4ccb04 100644
      errno = 0;
  
 diff --git a/src/tools/aps5hot.c b/src/tools/aps5hot.c
-index 57fb4cc..e1f7d0e 100644
+index 57fb4cc..4c05246 100644
 --- a/src/tools/aps5hot.c
 +++ b/src/tools/aps5hot.c
 @@ -9,6 +9,10 @@
@@ -484,7 +484,7 @@ index 57fb4cc..e1f7d0e 100644
  typedef struct aps5hot_s {
      const char* module;     // file name of the loaded module
      uintptr_t   offset;     // function address in the module
-@@ -57,8 +138,83 @@ static const aps5hot_t hot[] = {
+@@ -57,8 +138,85 @@ static const aps5hot_t hot[] = {
      {"libc.prx.guest.prx", 0x10430, 383, 0x9bbe0fbf4c4671e6ull, pFpiL, Aps5MemSet, "memset"},
      {"libc.prx.guest.prx", 0x4e2f0, 1213, 0xb530e8a466540be7ull, vFdpp, Aps5SinCos, "sincos"},
      {"libc.prx.guest.prx", 0x7f150, 62, 0xaae49931ef1d8a5full, iFppi, Aps5CompareExchange4, "cas4"},
@@ -520,7 +520,9 @@ index 57fb4cc..e1f7d0e 100644
 +
 +// Slot kinds (libaps5sdlgpu adapters): 1 = up to 6 integer arguments, 2 = (pointer, SDL_FColor by
 +// value: two xmm halves), 3 = 7 integer arguments (the 7th past the return address).
-+static void Aps5SdlGpuSlot6(x64emu_t* emu, uintptr_t fcn)
++// Also listed in isSimpleWrapper (wrapper.c, code 1): the dynarec then calls the native adapter
++// directly with rdi..r9 in x0..x5 and x0 into rax (call_n), skipping the int3 bridge path.
++void Aps5SdlGpuSlot6(x64emu_t* emu, uintptr_t fcn)
 +{
 +    uint64_t (*fn)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) = (void*)fcn;
 +    R_RAX = fn(R_RDI, R_RSI, R_RDX, R_RCX, R_R8, R_R9);
@@ -568,7 +570,7 @@ index 57fb4cc..e1f7d0e 100644
  static uint64_t Fnv1a(const uint8_t* p, size_t size)
  {
      uint64_t h = 0xcbf29ce484222325ull;
-@@ -117,6 +273,28 @@ int Aps5HotPatchModule(const char* path, uintptr_t delta)
+@@ -117,6 +275,28 @@ int Aps5HotPatchModule(const char* path, uintptr_t delta)
              strcat(names, hot[i].name);
          }
      }
@@ -806,6 +808,21 @@ index 4b5b6d0..aa4ffdf 100644
  	GO(pthread_attr_getaffinity_np, iFpLp_t) \
  	GO(pthread_attr_setaffinity_np, iFpLp_t) \
  	GO(pthread_getaffinity_np, iFpLp_t) \
+diff --git a/src/wrapped/generated/wrapper.c b/src/wrapped/generated/wrapper.c
+index f5bd3bd..90a8101 100644
+--- a/src/wrapped/generated/wrapper.c
++++ b/src/wrapped/generated/wrapper.c
+@@ -8669,8 +8669,10 @@ void iFEpvvppp(x64emu_t *emu, uintptr_t fcn) { iFEpppp_t fn = (iFEpppp_t)fcn; R_
+ void iFEpuvvppp(x64emu_t *emu, uintptr_t fcn) { iFEpuppp_t fn = (iFEpuppp_t)fcn; R_RAX=(int)fn(emu, (void*)R_RDI, (uint32_t)R_RSI, (void*)R_R8, (void*)R_R9, *(void**)(R_RSP + 8)); }
+ 
+ #if defined(ARM64)
++void Aps5SdlGpuSlot6(x64emu_t* emu, uintptr_t fcn);  // tools/aps5hot.c: native SDL_GPU slots (6 integer args)
+ int isSimpleWrapper(wrapper_t fun) {
+ 	if (box64_is32bits) return 0;
++	if (fun == &Aps5SdlGpuSlot6) return 1;
+ 	if (fun == &vFv) return 1;
+ 	if (fun == &vFc) return 1;
+ 	if (fun == &vFw) return 1;
 diff --git a/src/wrapped/wrappedlibc.c b/src/wrapped/wrappedlibc.c
 index dd02bad..af50501 100644
 --- a/src/wrapped/wrappedlibc.c
