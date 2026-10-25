@@ -27,6 +27,8 @@ GROUP = {
     "libSceMouse": ["libSceMouse"],
     "libSceKeyboard": ["libSceKeyboard"],
     "libSceAudioOut": ["libSceAudioOut"],
+    "libSceUserService": ["libSceUserService"],
+    "libSceSystemService": ["libSceSystemService"],
 }
 
 # Внутренности статического SDL и прочие не-API экспорты.
