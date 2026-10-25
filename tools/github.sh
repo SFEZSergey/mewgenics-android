@@ -19,6 +19,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 for cand in "${REPO_DIR:-}" "$HOME/mewgenics-android" "$SELF_REPO" "$HOME/ps5-android/pvz-replanted-android" "$HOME/pvz-replanted-android"; do
   if [ -n "$cand" ] && [ -d "$cand" ]; then REPO_DIR="$cand"; break; fi
 done
+PVZ_DIR="${PVZ_DIR:-$HOME/ps5-android/pvz-replanted-android}"
+[ -d "$PVZ_DIR" ] || PVZ_DIR="$HOME/pvz-replanted-android"
+
 A="${ANYPS5_DIR:-$HOME/ps5-android/src/AnyPS5}"
 [ -d "$A" ] || A="$HOME/ps5-android/AnyPS5"
 [ -d "$A" ] || A="$REPO_DIR/AnyPS5"
@@ -26,7 +29,13 @@ MESA="${MESA_DIR:-$HOME/ps5-android/src/mesa-26.3}"
 [ -d "$MESA" ] || MESA="$REPO_DIR/mesa"
 MESA_BUILD="${MESA_BUILD:-$MESA/build-android}"
 APK_DIR="${APK_DIR:-$HOME/ps5-android/apk}"
+[ -d "$APK_DIR" ] || APK_DIR="$PVZ_DIR/android"
 [ -d "$APK_DIR" ] || APK_DIR="$REPO_DIR/android"
+
+# Исходники каркаса APK (AndroidManifest.xml, res, src, native)
+APK_SRC="$REPO_DIR/android"
+[ -f "$APK_SRC/AndroidManifest.xml" ] || APK_SRC="$PVZ_DIR/android"
+
 GAME_ID="${GAME_ID:-PPSA37318}"
 P="$REPO_DIR/patches"
 
@@ -70,11 +79,12 @@ fi
 
 # 5. APK: в папку сборки — свежие лаунчер и libmain из репозитория (build.sh там свой, с путями Termux)
 echo "=== APK ==="
+export SDLGPU_DIR="${SDLGPU_DIR:-$REPO_DIR/android/sdlgpu}"
 if [ -d "$APK_DIR" ]; then
-  cp "$REPO_DIR/android/native/sdl_main.c" "$APK_DIR/native/"
-  cp -r "$REPO_DIR/android/src/." "$APK_DIR/src/"
-  cp -r "$REPO_DIR/android/res/." "$APK_DIR/res/"
-  cp "$REPO_DIR/android/AndroidManifest.xml" "$APK_DIR/"
+  [ -f "$APK_SRC/native/sdl_main.c" ] && cp "$APK_SRC/native/sdl_main.c" "$APK_DIR/native/"
+  [ -d "$APK_SRC/src" ] && cp -r "$APK_SRC/src/." "$APK_DIR/src/"
+  [ -d "$APK_SRC/res" ] && cp -r "$APK_SRC/res/." "$APK_DIR/res/"
+  [ -f "$APK_SRC/AndroidManifest.xml" ] && cp "$APK_SRC/AndroidManifest.xml" "$APK_DIR/"
   (cd "$APK_DIR" && bash build.sh) || { fail "build.sh"; exit 1; }
   APK_FILE="$APK_DIR/out/PvZ-Replanted.apk"
 else
