@@ -520,7 +520,7 @@ index 57fb4cc..4c05246 100644
 +}
 +
 +// float f(void*, void*, float): no generated wrapper has this shape.
-+static void Aps5Wrap_fFppf(x64emu_t* emu, uintptr_t fcn)
++void Aps5Wrap_fFppf(x64emu_t* emu, uintptr_t fcn)
 +{
 +    float (*fn)(void*, void*, float) = (float (*)(void*, void*, float))fcn;
 +    emu->xmm[0].f[0] = fn((void*)R_RDI, (void*)R_RSI, emu->xmm[0].f[0]);
@@ -857,14 +857,16 @@ diff --git a/src/wrapped/generated/wrapper.c b/src/wrapped/generated/wrapper.c
 index f5bd3bd..90a8101 100644
 --- a/src/wrapped/generated/wrapper.c
 +++ b/src/wrapped/generated/wrapper.c
-@@ -8669,8 +8669,10 @@ void iFEpvvppp(x64emu_t *emu, uintptr_t fcn) { iFEpppp_t fn = (iFEpppp_t)fcn; R_
+@@ -8669,8 +8669,12 @@ void iFEpvvppp(x64emu_t *emu, uintptr_t fcn) { iFEpppp_t fn = (iFEpppp_t)fcn; R_
  void iFEpuvvppp(x64emu_t *emu, uintptr_t fcn) { iFEpuppp_t fn = (iFEpuppp_t)fcn; R_RAX=(int)fn(emu, (void*)R_RDI, (uint32_t)R_RSI, (void*)R_R8, (void*)R_R9, *(void**)(R_RSP + 8)); }
  
  #if defined(ARM64)
 +void Aps5SdlGpuSlot6(x64emu_t* emu, uintptr_t fcn);  // tools/aps5hot.c: native SDL_GPU slots (6 integer args)
++void Aps5Wrap_fFppf(x64emu_t* emu, uintptr_t fcn);   // tools/aps5hot.c: native FaReverbProcessChannel
  int isSimpleWrapper(wrapper_t fun) {
  	if (box64_is32bits) return 0;
 +	if (fun == &Aps5SdlGpuSlot6) return 1;
++	if (fun == &Aps5Wrap_fFppf) return -2;
  	if (fun == &vFv) return 1;
  	if (fun == &vFc) return 1;
  	if (fun == &vFw) return 1;

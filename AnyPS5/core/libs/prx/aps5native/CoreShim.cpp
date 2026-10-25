@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <exception>
 #include <limits>
 #include <map>
@@ -517,17 +518,32 @@ extern "C" void NotImplemented_nid_no_patch(const char* funcName) {
 
 // --- libkernel: время и метаданные приложения --------------------------------------------------
 
+namespace {
+
+std::uint64_t monotonicNanos() {
+    struct timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<std::uint64_t>(ts.tv_sec) * 1000000000ULL +
+           static_cast<std::uint64_t>(ts.tv_nsec);
+}
+
+std::uint64_t processStartNanos() {
+    static const std::uint64_t start = monotonicNanos();
+    return start;
+}
+
+} // namespace
+
 extern "C" std::uint64_t sceKernelGetProcessTime() {
-    return x86(Aps5Native::ProcessTime);
+    return (monotonicNanos() - processStartNanos()) / 1000ULL;
 }
 
 extern "C" std::uint64_t sceKernelGetProcessTimeCounter() {
-    return x86(Aps5Native::ProcessTimeCounter);
+    return monotonicNanos() - processStartNanos();
 }
 
 extern "C" std::uint64_t sceKernelGetProcessTimeCounterFrequency() {
-    static const std::uint64_t frequency = x86(Aps5Native::ProcessTimeCounterFrequency);
-    return frequency;
+    return 1000000000ULL;
 }
 
 extern "C" bool HasAppIcon_nid_postfix() {

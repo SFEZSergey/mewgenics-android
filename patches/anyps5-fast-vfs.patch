@@ -164,3 +164,52 @@ index c237463a..e4cc3281 100644
      if (TraceFileIo()) std::fprintf(stderr, "[fileio] stat %s\n", path);
      return 0;
  }
+diff --git a/AnyPS5/core/libs/prx/aps5native/CoreShim.cpp b/AnyPS5/core/libs/prx/aps5native/CoreShim.cpp
+index 7dbb98be..070c4cde 100644
+--- a/AnyPS5/core/libs/prx/aps5native/CoreShim.cpp
++++ b/AnyPS5/core/libs/prx/aps5native/CoreShim.cpp
+@@ -16,6 +16,7 @@
+ #include <chrono>
+ #include <cstdio>
+ #include <cstdlib>
++#include <ctime>
+ #include <exception>
+ #include <limits>
+ #include <map>
+@@ -517,17 +518,32 @@ extern "C" void NotImplemented_nid_no_patch(const char* funcName) {
+ 
+ // --- libkernel: ╨▓╤А╨╡╨╝╤П ╨╕ ╨╝╨╡╤В╨░╨┤╨░╨╜╨╜╤Л╨╡ ╨┐╤А╨╕╨╗╨╛╨╢╨╡╨╜╨╕╤П --------------------------------------------------
+ 
++namespace {
++
++std::uint64_t monotonicNanos() {
++    struct timespec ts{};
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return static_cast<std::uint64_t>(ts.tv_sec) * 1000000000ULL +
++           static_cast<std::uint64_t>(ts.tv_nsec);
++}
++
++std::uint64_t processStartNanos() {
++    static const std::uint64_t start = monotonicNanos();
++    return start;
++}
++
++} // namespace
++
+ extern "C" std::uint64_t sceKernelGetProcessTime() {
+-    return x86(Aps5Native::ProcessTime);
++    return (monotonicNanos() - processStartNanos()) / 1000ULL;
+ }
+ 
+ extern "C" std::uint64_t sceKernelGetProcessTimeCounter() {
+-    return x86(Aps5Native::ProcessTimeCounter);
++    return monotonicNanos() - processStartNanos();
+ }
+ 
+ extern "C" std::uint64_t sceKernelGetProcessTimeCounterFrequency() {
+-    static const std::uint64_t frequency = x86(Aps5Native::ProcessTimeCounterFrequency);
+-    return frequency;
++    return 1000000000ULL;
+ }
+ 
+ extern "C" bool HasAppIcon_nid_postfix() {
