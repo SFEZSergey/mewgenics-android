@@ -378,6 +378,51 @@ index 35895a1..d4ccb04 100644
      sigprocmask(SIG_SETMASK, (sigset_t*)&u->uc_sigmask, NULL);
      errno = 0;
  
+diff --git a/src/libtools/threads.c b/src/libtools/threads.c
+index a7141d9..ae2b713 100644
+--- a/src/libtools/threads.c
++++ b/src/libtools/threads.c
+@@ -1229,33 +1229,29 @@ static void convert_glibc_mutex(void* m)
+ 		__atomic_compare_exchange_n((uint16_t*)m, &expected, bits, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
+ 	__atomic_store_n(kind, 0, __ATOMIC_RELAXED);
+ }
+-EXPORT int my_pthread_mutex_lock(x64emu_t* emu, pthread_mutex_t* m)
++EXPORT int my_pthread_mutex_lock(pthread_mutex_t* m)
+ {
+-	(void)emu;
+ 	convert_glibc_mutex(m);
+ 	return pthread_mutex_lock(m);
+ }
+-EXPORT int my___pthread_mutex_lock(x64emu_t* emu, pthread_mutex_t* m) __attribute__((alias("my_pthread_mutex_lock")));
+-EXPORT int my_pthread_mutex_trylock(x64emu_t* emu, pthread_mutex_t* m)
++EXPORT int my___pthread_mutex_lock(pthread_mutex_t* m) __attribute__((alias("my_pthread_mutex_lock")));
++EXPORT int my_pthread_mutex_trylock(pthread_mutex_t* m)
+ {
+-	(void)emu;
+ 	convert_glibc_mutex(m);
+ 	return pthread_mutex_trylock(m);
+ }
+-EXPORT int my___pthread_mutex_trylock(x64emu_t* emu, pthread_mutex_t* m) __attribute__((alias("my_pthread_mutex_trylock")));
+-EXPORT int my_pthread_mutex_timedlock(x64emu_t* emu, pthread_mutex_t* m, const struct timespec* t)
++EXPORT int my___pthread_mutex_trylock(pthread_mutex_t* m) __attribute__((alias("my_pthread_mutex_trylock")));
++EXPORT int my_pthread_mutex_timedlock(pthread_mutex_t* m, const struct timespec* t)
+ {
+-	(void)emu;
+ 	convert_glibc_mutex(m);
+ 	return pthread_mutex_timedlock(m, t);
+ }
+-EXPORT int my_pthread_mutex_unlock(x64emu_t* emu, pthread_mutex_t* m)
++EXPORT int my_pthread_mutex_unlock(pthread_mutex_t* m)
+ {
+-	(void)emu;
+ 	convert_glibc_mutex(m);
+ 	return pthread_mutex_unlock(m);
+ }
+-EXPORT int my___pthread_mutex_unlock(x64emu_t* emu, pthread_mutex_t* m) __attribute__((alias("my_pthread_mutex_unlock")));
++EXPORT int my___pthread_mutex_unlock(pthread_mutex_t* m) __attribute__((alias("my_pthread_mutex_unlock")));
+ #endif
+ 
+ #define THRD_SUCCESS	0
 diff --git a/src/tools/aps5hot.c b/src/tools/aps5hot.c
 index 57fb4cc..4c05246 100644
 --- a/src/tools/aps5hot.c
@@ -907,9 +952,30 @@ index 91330f2..5d0b2ef 100644
  #include "wrappedlib_init.h"
 +
 diff --git a/src/wrapped/wrappedlibpthread_private.h b/src/wrapped/wrappedlibpthread_private.h
-index 187b5e8..2bb38b6 100644
+index 187b5e8..244826f 100644
 --- a/src/wrapped/wrappedlibpthread_private.h
 +++ b/src/wrapped/wrappedlibpthread_private.h
+@@ -216,13 +216,13 @@ GOM(pthread_mutex_init, iFpp)
+ #endif
+ #ifdef ANDROID
+ // bionic keeps the mutex type in the state word: glibc static initializers need converting
+-GOM(__pthread_mutex_lock, iFEp)
+-GOM(pthread_mutex_lock, iFEp)
+-GOM(pthread_mutex_timedlock, iFEpp)
+-GOM(__pthread_mutex_trylock, iFEp)
+-GOM(pthread_mutex_trylock, iFEp)
+-GOM(__pthread_mutex_unlock, iFEp)
+-GOM(pthread_mutex_unlock, iFEp)
++GOM(__pthread_mutex_lock, iFp)
++GOM(pthread_mutex_lock, iFp)
++GOM(pthread_mutex_timedlock, iFpp)
++GOM(__pthread_mutex_trylock, iFp)
++GOM(pthread_mutex_trylock, iFp)
++GOM(__pthread_mutex_unlock, iFp)
++GOM(pthread_mutex_unlock, iFp)
+ #else
+ GO(__pthread_mutex_lock, iFp)
+ GO(pthread_mutex_lock, iFp)
 @@ -272,7 +272,11 @@ GO(pthread_setschedparam, iFLip)
  GO(pthread_setschedprio, iFLi)
  GO(__pthread_setspecific, iFLp)

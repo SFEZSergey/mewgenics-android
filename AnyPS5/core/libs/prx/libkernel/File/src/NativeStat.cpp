@@ -132,6 +132,13 @@ void FillFileStat(const std::filesystem::path& nativePath, FileStat* sb) {
     CopyNativeStat(st, sb);
 }
 
+bool FillFileStatPath(const std::filesystem::path& nativePath, FileStat* sb) {
+    NativeStat st{};
+    if (DoStat(nativePath, &st) != 0) return false;
+    CopyNativeStat(st, sb);
+    return true;
+}
+
 void FillFileStat(int nativeDescriptor, FileStat* sb) {
     NativeStat st{};
     if (DoFstat(nativeDescriptor, &st) != 0) {

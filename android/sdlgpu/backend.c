@@ -285,11 +285,18 @@ static bool dumpWanted(void)
 {
     static Uint64 last;
     const char *trigger = getenv("APS5_DUMP_TRIGGER");
-    if (!trigger || access(trigger, F_OK) != 0 || !canvas) return false;
+    if (!trigger || !canvas) return false;
+    static Uint32 frameCount = 0;
+    static bool cachedExists = false;
+    if ((++frameCount % 60) == 1) {
+        cachedExists = (access(trigger, F_OK) == 0);
+    }
+    if (!cachedExists) return false;
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     if ((Uint64)ts.tv_sec < last + 1) return false;
     last = (Uint64)ts.tv_sec;
+    cachedExists = false;
     return true;
 }
 // Records the canvas download into the frame's command buffer (before it is submitted).
@@ -362,12 +369,17 @@ static void noteAtlas(SDL_GPUTexture *texture, const SDL_GPUTextureCreateInfo *i
 static void texDump(SDL_GPUCommandBuffer *cb)
 {
     static bool done;
+    static Uint32 frameCount = 0;
+    static bool cachedExists = false;
     const char *trigger = getenv("APS5_DUMP_TRIGGER");
     if (!trigger || !atlasTexture) return;
     const char *slash = strrchr(trigger, '/');
     char path[640];
     snprintf(path, sizeof(path), "%.*s/texdump", slash ? (int)(slash - trigger) : 1, slash ? trigger : ".");
-    if (access(path, F_OK) != 0) { done = false; return; }
+    if ((++frameCount % 60) == 1) {
+        cachedExists = (access(path, F_OK) == 0);
+    }
+    if (!cachedExists) { done = false; return; }
     if (done) return;
     done = true;
     SDL_GPURenderer *renderer = ((CommandBufferCommonHeader *)cb)->device->driverData;

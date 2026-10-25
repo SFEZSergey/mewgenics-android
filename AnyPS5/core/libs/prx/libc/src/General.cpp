@@ -103,7 +103,13 @@ std::optional<std::filesystem::path> ResolveAlias(const std::string& guestPath) 
     for (const auto& [prefix, host] : aliases.entries) {
         if (!HasPrefix(relative, prefix)) continue;
         if (relative.size() == prefix.size()) return std::filesystem::path(host).make_preferred();
-        std::filesystem::path result = ResolveHostPath(host, relative.substr(prefix.size() + 1));
+        const auto sub = relative.substr(prefix.size() + 1);
+        const auto direct = std::filesystem::path(host) / sub;
+        std::error_code ec;
+        if (std::filesystem::exists(direct, ec) || std::filesystem::exists(direct.parent_path(), ec)) {
+            return direct.make_preferred();
+        }
+        std::filesystem::path result = ResolveHostPath(host, sub);
         return result.make_preferred();
     }
     return std::nullopt;
@@ -304,6 +310,11 @@ extern "C" std::filesystem::path ResolvePath_nid_no_patch(const char* path) {
         auto& state = Directories();
         const char* sub = path[5] == '/' ? path + 6 : "";
         return state.root / sub;
+    }
+    if (path[0] == '/' && path[1] == 's' && path[2] == 'a' && path[3] == 'v' && path[4] == 'e' && path[5] == 'd' && path[6] == 'a' && path[7] == 't' && path[8] == 'a' && (path[9] >= '0' && path[9] <= '9') && (path[10] == '/' || path[10] == '\0')) {
+        auto& state = Directories();
+        const char* sub = path[10] == '/' ? path + 11 : "";
+        return state.root / "_sd" / "SDLStorage" / sub;
     }
     auto& state = Directories();
     std::lock_guard lock(state.mutex);

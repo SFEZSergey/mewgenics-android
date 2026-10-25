@@ -217,28 +217,18 @@ std::int64_t APS5_VABI sceKernelLseek(int d, std::int64_t offset, int whence) {
 }
 
 int APS5_VABI sceKernelStat(const char* path, FileStat* sb) {
-    if (path == nullptr) {
-        throw std::invalid_argument(std::string(__func__) + ": path is null");
-    }
-    if (sb == nullptr) {
-        throw std::invalid_argument(std::string(__func__) + ": sb is null");
-    }
+    if (path == nullptr || sb == nullptr) return SceErrorFromErrno(14);
     std::filesystem::path native;
     try {
         native = ResolvePath_nid_no_patch(path);
     } catch (const std::filesystem::filesystem_error&) {
         return SceErrorFromErrno(2);
     }
-    std::error_code error;
-    constexpr int GuestEnotdir = 20;
-    const auto status = std::filesystem::status(native, error);
-    if (error == std::errc::not_a_directory) return SceErrorFromErrno(GuestEnotdir);
-    if (!std::filesystem::exists(status)) {
-        return SceErrorFromErrno(2);
+    if (!File::FillFileStatPath(native, sb)) {
+        return SceErrorFromErrno(errno);
     }
     const std::string_view guestPath(path);
-    if (!guestPath.empty() && guestPath.back() == '/' && !std::filesystem::is_directory(status)) return SceErrorFromErrno(GuestEnotdir);
-    File::FillFileStat(native, sb);
+    if (!guestPath.empty() && guestPath.back() == '/' && (sb->st_mode & 0170000) != 0040000) return SceErrorFromErrno(20);
     if (TraceFileIo()) std::fprintf(stderr, "[fileio] stat %s\n", path);
     return 0;
 }
