@@ -124,7 +124,7 @@ static bool TraceFileIo() { static const bool on = std::getenv("APS5_TRACE_FILEI
 extern "C" {
 
 int APS5_VABI sceKernelOpen(const char* path, int flags, std::uint16_t mode) {
-    APS5_LOG_OUT("path=%s flags=0x%X nativeFlags=0x%X mode=0%o", path, flags, MapFlags(flags), mode);
+    if (TraceFileIo()) APS5_LOG_OUT("path=%s flags=0x%X nativeFlags=0x%X mode=0%o", path, flags, MapFlags(flags), mode);
     if (path != nullptr && File::IsRandomDevicePath(path)) {
         if ((flags & SCE_KERNEL_O_ACCMODE) != SCE_KERNEL_O_RDONLY) throw std::runtime_error(std::string(__func__) + ": writing to " + path + " is not implemented");
         const int fd = File::OpenRandomDevice();
@@ -167,7 +167,7 @@ int APS5_VABI sceKernelClose(int d) {
 #endif
     if (NativeClose(d) != 0) {
         if (errno == EBADF) return SCE_KERNEL_ERROR_EBADF;
-        throw std::runtime_error(std::string(__func__) + ": close failed, fd=" + std::to_string(d) + ", errno=" + std::to_string(errno));
+        return SceErrorFromErrno(errno);
     }
     return 0;
 }
@@ -178,14 +178,12 @@ std::int64_t APS5_VABI sceKernelRead(int d, void* buf, std::size_t nbytes) {
         return n < 0 ? SceKernelError(*__error_nid_postfix()) : n;
     }
     if (buf == nullptr) {
-        throw std::invalid_argument(std::string(__func__) + ": buf is null");
+        return SceErrorFromErrno(14); // EFAULT
     }
-    const GuestArena::HostWrite destination(buf, nbytes);
-    if (!destination.Open()) errno = EFAULT;
-    else if (File::ReadRandomDevice(d, buf, nbytes)) return static_cast<std::int64_t>(nbytes);
-    auto n = destination.Open() ? NativeRead(d, buf, nbytes) : -1;
+    if (File::ReadRandomDevice(d, buf, nbytes)) return static_cast<std::int64_t>(nbytes);
+    auto n = NativeRead(d, buf, nbytes);
     if (n < 0) {
-        throw std::runtime_error(std::string(__func__) + ": read failed, fd=" + std::to_string(d) + ", errno=" + std::to_string(errno));
+        return SceErrorFromErrno(errno);
     }
     if (TraceFileIo()) std::fprintf(stderr, "[fileio] read fd %d want %zu -> %lld\n", d, nbytes, static_cast<long long>(n));
     return static_cast<std::int64_t>(n);
@@ -197,22 +195,22 @@ std::int64_t APS5_VABI sceKernelWrite(int d, const void* buf, std::size_t nbytes
         return n < 0 ? SceKernelError(*__error_nid_postfix()) : n;
     }
     if (buf == nullptr) {
-        throw std::invalid_argument(std::string(__func__) + ": buf is null");
+        return SceErrorFromErrno(14); // EFAULT
     }
     auto n = NativeWrite(d, buf, nbytes);
     if (n < 0) {
-        throw std::runtime_error(std::string(__func__) + ": write failed, fd=" + std::to_string(d) + ", errno=" + std::to_string(errno));
+        return SceErrorFromErrno(errno);
     }
     return static_cast<std::int64_t>(n);
 }
 
 std::int64_t APS5_VABI sceKernelLseek(int d, std::int64_t offset, int whence) {
     if (whence < 0 || whence > 2) {
-        throw std::invalid_argument(std::string(__func__) + ": invalid whence=" + std::to_string(whence));
+        return SceErrorFromErrno(22); // EINVAL
     }
     std::int64_t result = NativeLseek(d, offset, whence);
     if (result < 0) {
-        throw std::runtime_error(std::string(__func__) + ": lseek failed, fd=" + std::to_string(d) + ", errno=" + std::to_string(errno));
+        return SceErrorFromErrno(errno);
     }
     if (TraceFileIo()) std::fprintf(stderr, "[fileio] lseek fd %d off %lld whence %d -> %lld\n", d, static_cast<long long>(offset), whence, static_cast<long long>(result));
     return result;

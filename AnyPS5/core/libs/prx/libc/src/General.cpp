@@ -300,6 +300,11 @@ extern "C" void BlockPathAlias_nid_no_patch(const char* guestPrefix) {
 
 extern "C" std::filesystem::path ResolvePath_nid_no_patch(const char* path) {
     if (!path) { APS5_INVALID_ARG_EX; }
+    if (path[0] == '/' && path[1] == 'a' && path[2] == 'p' && path[3] == 'p' && path[4] == '0' && (path[5] == '/' || path[5] == '\0')) {
+        auto& state = Directories();
+        const char* sub = path[5] == '/' ? path + 6 : "";
+        return state.root / sub;
+    }
     auto& state = Directories();
     std::lock_guard lock(state.mutex);
     return Resolve(state, path);
