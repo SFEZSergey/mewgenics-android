@@ -434,22 +434,24 @@ typedef struct KnownBuffer
     SDL_GPUBuffer *buffer;
     Uint32 usage, size;
 } KnownBuffer;
-static KnownBuffer knownBuffers[4096];
-static int knownBufferNext;
+#define KNOWN_BUFFER_BITS 11
+static KnownBuffer knownBuffers[1u << KNOWN_BUFFER_BITS];
+static Uint32 knownBufferSlot(const void *p) { return (Uint32)((((Uint64)(uintptr_t)p >> 4) * 0x9e3779b97f4a7c15ull) >> (64 - KNOWN_BUFFER_BITS)); }
+
 static uint64_t L_CreateBuffer(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3)
 {
     const uint64_t buffer = A_CreateBuffer(a0, a1, a2, a3);
     if (buffer) {
-        KnownBuffer *slot = &knownBuffers[__atomic_fetch_add(&knownBufferNext, 1, __ATOMIC_RELAXED) % (int)SDL_arraysize(knownBuffers)];
-        *slot = (KnownBuffer){(SDL_GPUBuffer *)(uintptr_t)buffer, (Uint32)a1, (Uint32)a2};
+        Uint32 slot = knownBufferSlot((const void *)(uintptr_t)buffer);
+        knownBuffers[slot] = (KnownBuffer){(SDL_GPUBuffer *)(uintptr_t)buffer, (Uint32)a1, (Uint32)a2};
     }
     return buffer;
 }
 static const KnownBuffer *findBuffer(const void *p)
 {
-    for (int i = 0; p && i < (int)SDL_arraysize(knownBuffers); ++i)
-        if (knownBuffers[i].buffer == p) return &knownBuffers[i];
-    return NULL;
+    if (!p) return NULL;
+    Uint32 slot = knownBufferSlot(p);
+    return knownBuffers[slot].buffer == p ? &knownBuffers[slot] : NULL;
 }
 static bool isTexture(const void *p)
 {
@@ -459,8 +461,12 @@ static bool isTexture(const void *p)
 // Vertex storage textures (see Aps5MapShader): a buffer is bound as the storage buffer of that slot.
 static uint64_t L_BindVertexStorageTextures(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3)
 {
-    static int reports;
     SDL_GPUCommandBuffer *cb = (SDL_GPUCommandBuffer *)(uintptr_t)a0;
+    // Fast path: if the atlas mirror storage buffer is already bound for this pass, skip redundant work
+    if (tableBuffer && tableBoundCb == cb && tableBoundPass == passGeneration && tableBoundBuffer == tableBuffer) {
+        return 0;
+    }
+    static int reports;
     void *const *items = (void *const *)(uintptr_t)a2;
     const Uint32 count = (Uint32)a3 < 8 ? (Uint32)a3 : 8;
     SDL_GPUBuffer *buffers[8];
@@ -478,7 +484,7 @@ static uint64_t L_BindVertexStorageTextures(uint64_t a0, uint64_t a1, uint64_t a
     if (bound) {
         real.BindVertexStorageBuffers(cb, (Uint32)a1, buffers, bound);
         tableBoundCb = NULL;
-    } else if (tableBuffer && (tableBoundCb != cb || tableBoundPass != passGeneration || tableBoundBuffer != tableBuffer)) {
+    } else if (tableBuffer) {
         // Once per render pass (SDL clears the bindings when a pass ends); the title asks before every draw.
         real.BindVertexStorageBuffers(cb, 0, &tableBuffer, 1);
         tableBoundCb = cb;
