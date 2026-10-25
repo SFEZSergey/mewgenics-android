@@ -29,6 +29,11 @@ GROUP = {
     "libSceAudioOut": ["libSceAudioOut"],
     "libSceUserService": ["libSceUserService"],
     "libSceSystemService": ["libSceSystemService"],
+    "libSceRtc": ["libSceRtc"],
+    "libSceCommonDialog": ["libSceCommonDialog"],
+    "libSceImeDialog": ["libSceImeDialog"],
+    "libSceRandom": ["libSceRandom"],
+    "libSceWebBrowserDialog": ["libSceWebBrowserDialog"],
 }
 
 # Внутренности статического SDL и прочие не-API экспорты.
@@ -46,14 +51,22 @@ FLOAT_WORDS = {"float"}
 DOUBLE_WORDS = {"double"}
 
 
-def exports(prx):
-    out = subprocess.run(["llvm-nm", "-D", "--defined-only", prx], capture_output=True, text=True, check=True).stdout
-    names = []
-    for line in out.splitlines():
-        parts = line.split()
-        if len(parts) == 3 and parts[1] in ("T", "W") and not SKIP.search(parts[2]):
-            names.append(parts[2].split("@")[0])
-    return sorted(set(names))
+def exports(prx, fallback_sources=None):
+    try:
+        out = subprocess.run(["llvm-nm", "-D", "--defined-only", prx], capture_output=True, text=True, check=True).stdout
+        names = []
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) == 3 and parts[1] in ("T", "W") and not SKIP.search(parts[2]):
+                names.append(parts[2].split("@")[0])
+        return sorted(set(names))
+    except Exception:
+        if fallback_sources:
+            names = []
+            for text in fallback_sources.values():
+                names += re.findall(r"\bAPS5_VABI\s+([A-Za-z0-9_]+)\s*\(", text)
+            return sorted(set(names))
+        raise
 
 
 def read_sources(root):
@@ -289,7 +302,7 @@ def main():
     typedefs = collect_typedefs(all_texts)
     status = 0
     for library in GROUP:
-        names = exports(os.path.join(unpatched, f"{library}.prx"))
+        names = exports(os.path.join(unpatched, f"{library}.prx"), fallback_sources=per_lib[library])
         kept, problems = generate(library, names, per_lib[library], typedefs, manual, out_dir, library == "libSceAgcDriver")
         print(f"{library}: {len(kept)} заглушек, {len(problems)} требуют внимания")
         for name, why in problems:

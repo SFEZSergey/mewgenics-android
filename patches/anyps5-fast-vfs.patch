@@ -1,173 +1,20 @@
-diff --git a/core/libs/prx/libc/src/General.cpp b/core/libs/prx/libc/src/General.cpp
-index fd554d14..ab17e067 100644
---- a/core/libs/prx/libc/src/General.cpp
-+++ b/core/libs/prx/libc/src/General.cpp
-@@ -103,7 +103,13 @@ std::optional<std::filesystem::path> ResolveAlias(const std::string& guestPath)
-     for (const auto& [prefix, host] : aliases.entries) {
-         if (!HasPrefix(relative, prefix)) continue;
-         if (relative.size() == prefix.size()) return std::filesystem::path(host).make_preferred();
--        std::filesystem::path result = ResolveHostPath(host, relative.substr(prefix.size() + 1));
-+        const auto sub = relative.substr(prefix.size() + 1);
-+        const auto direct = std::filesystem::path(host) / sub;
-+        std::error_code ec;
-+        if (std::filesystem::exists(direct, ec) || std::filesystem::exists(direct.parent_path(), ec)) {
-+            return direct.make_preferred();
-+        }
-+        std::filesystem::path result = ResolveHostPath(host, sub);
-         return result.make_preferred();
-     }
-     return std::nullopt;
-@@ -300,6 +306,16 @@ extern "C" void BlockPathAlias_nid_no_patch(const char* guestPrefix) {
- 
- extern "C" std::filesystem::path ResolvePath_nid_no_patch(const char* path) {
-     if (!path) { APS5_INVALID_ARG_EX; }
-+    if (path[0] == '/' && path[1] == 'a' && path[2] == 'p' && path[3] == 'p' && path[4] == '0' && (path[5] == '/' || path[5] == '\0')) {
-+        auto& state = Directories();
-+        const char* sub = path[5] == '/' ? path + 6 : "";
-+        return state.root / sub;
-+    }
-+    if (path[0] == '/' && path[1] == 's' && path[2] == 'a' && path[3] == 'v' && path[4] == 'e' && path[5] == 'd' && path[6] == 'a' && path[7] == 't' && path[8] == 'a' && (path[9] >= '0' && path[9] <= '9') && (path[10] == '/' || path[10] == '\0')) {
-+        auto& state = Directories();
-+        const char* sub = path[10] == '/' ? path + 11 : "";
-+        return state.root / "_sd" / "SDLStorage" / sub;
-+    }
-     auto& state = Directories();
-     std::lock_guard lock(state.mutex);
-     return Resolve(state, path);
-diff --git a/core/libs/prx/libkernel/File/include/NativeStat.hpp b/core/libs/prx/libkernel/File/include/NativeStat.hpp
-index 5715f021..d5ac2196 100644
---- a/core/libs/prx/libkernel/File/include/NativeStat.hpp
-+++ b/core/libs/prx/libkernel/File/include/NativeStat.hpp
-@@ -7,6 +7,7 @@
- namespace File {
- 
- void FillFileStat(const std::filesystem::path& nativePath, FileStat* sb);
-+bool FillFileStatPath(const std::filesystem::path& nativePath, FileStat* sb);
- void FillFileStat(int nativeDescriptor, FileStat* sb);
- bool FillFileStatFromDescriptor(int fd, FileStat* sb);
- bool FillLinkStat(const std::filesystem::path& nativePath, FileStat* sb);
-diff --git a/core/libs/prx/libkernel/File/src/NativeStat.cpp b/core/libs/prx/libkernel/File/src/NativeStat.cpp
-index 5454db47..0ea61eda 100644
---- a/core/libs/prx/libkernel/File/src/NativeStat.cpp
-+++ b/core/libs/prx/libkernel/File/src/NativeStat.cpp
-@@ -132,6 +132,13 @@ void FillFileStat(const std::filesystem::path& nativePath, FileStat* sb) {
-     CopyNativeStat(st, sb);
- }
- 
-+bool FillFileStatPath(const std::filesystem::path& nativePath, FileStat* sb) {
-+    NativeStat st{};
-+    if (DoStat(nativePath, &st) != 0) return false;
-+    CopyNativeStat(st, sb);
-+    return true;
-+}
-+
- void FillFileStat(int nativeDescriptor, FileStat* sb) {
-     NativeStat st{};
-     if (DoFstat(nativeDescriptor, &st) != 0) {
-diff --git a/core/libs/prx/libkernel/File/src/Open.cpp b/core/libs/prx/libkernel/File/src/Open.cpp
-index c237463a..e4cc3281 100644
---- a/core/libs/prx/libkernel/File/src/Open.cpp
-+++ b/core/libs/prx/libkernel/File/src/Open.cpp
-@@ -124,7 +124,7 @@ static bool TraceFileIo() { static const bool on = std::getenv("APS5_TRACE_FILEI
- extern "C" {
- 
- int APS5_VABI sceKernelOpen(const char* path, int flags, std::uint16_t mode) {
--    APS5_LOG_OUT("path=%s flags=0x%X nativeFlags=0x%X mode=0%o", path, flags, MapFlags(flags), mode);
-+    if (TraceFileIo()) APS5_LOG_OUT("path=%s flags=0x%X nativeFlags=0x%X mode=0%o", path, flags, MapFlags(flags), mode);
-     if (path != nullptr && File::IsRandomDevicePath(path)) {
-         if ((flags & SCE_KERNEL_O_ACCMODE) != SCE_KERNEL_O_RDONLY) throw std::runtime_error(std::string(__func__) + ": writing to " + path + " is not implemented");
-         const int fd = File::OpenRandomDevice();
-@@ -167,7 +167,7 @@ int APS5_VABI sceKernelClose(int d) {
- #endif
-     if (NativeClose(d) != 0) {
-         if (errno == EBADF) return SCE_KERNEL_ERROR_EBADF;
--        throw std::runtime_error(std::string(__func__) + ": close failed, fd=" + std::to_string(d) + ", errno=" + std::to_string(errno));
-+        return SceErrorFromErrno(errno);
-     }
-     return 0;
- }
-@@ -178,14 +178,12 @@ std::int64_t APS5_VABI sceKernelRead(int d, void* buf, std::size_t nbytes) {
-         return n < 0 ? SceKernelError(*__error_nid_postfix()) : n;
-     }
-     if (buf == nullptr) {
--        throw std::invalid_argument(std::string(__func__) + ": buf is null");
-+        return SceErrorFromErrno(14); // EFAULT
-     }
--    const GuestArena::HostWrite destination(buf, nbytes);
--    if (!destination.Open()) errno = EFAULT;
--    else if (File::ReadRandomDevice(d, buf, nbytes)) return static_cast<std::int64_t>(nbytes);
--    auto n = destination.Open() ? NativeRead(d, buf, nbytes) : -1;
-+    if (File::ReadRandomDevice(d, buf, nbytes)) return static_cast<std::int64_t>(nbytes);
-+    auto n = NativeRead(d, buf, nbytes);
-     if (n < 0) {
--        throw std::runtime_error(std::string(__func__) + ": read failed, fd=" + std::to_string(d) + ", errno=" + std::to_string(errno));
-+        return SceErrorFromErrno(errno);
-     }
-     if (TraceFileIo()) std::fprintf(stderr, "[fileio] read fd %d want %zu -> %lld\n", d, nbytes, static_cast<long long>(n));
-     return static_cast<std::int64_t>(n);
-@@ -197,50 +195,40 @@ std::int64_t APS5_VABI sceKernelWrite(int d, const void* buf, std::size_t nbytes
-         return n < 0 ? SceKernelError(*__error_nid_postfix()) : n;
-     }
-     if (buf == nullptr) {
--        throw std::invalid_argument(std::string(__func__) + ": buf is null");
-+        return SceErrorFromErrno(14); // EFAULT
-     }
-     auto n = NativeWrite(d, buf, nbytes);
-     if (n < 0) {
--        throw std::runtime_error(std::string(__func__) + ": write failed, fd=" + std::to_string(d) + ", errno=" + std::to_string(errno));
-+        return SceErrorFromErrno(errno);
-     }
-     return static_cast<std::int64_t>(n);
- }
- 
- std::int64_t APS5_VABI sceKernelLseek(int d, std::int64_t offset, int whence) {
-     if (whence < 0 || whence > 2) {
--        throw std::invalid_argument(std::string(__func__) + ": invalid whence=" + std::to_string(whence));
-+        return SceErrorFromErrno(22); // EINVAL
-     }
-     std::int64_t result = NativeLseek(d, offset, whence);
-     if (result < 0) {
--        throw std::runtime_error(std::string(__func__) + ": lseek failed, fd=" + std::to_string(d) + ", errno=" + std::to_string(errno));
-+        return SceErrorFromErrno(errno);
-     }
-     if (TraceFileIo()) std::fprintf(stderr, "[fileio] lseek fd %d off %lld whence %d -> %lld\n", d, static_cast<long long>(offset), whence, static_cast<long long>(result));
-     return result;
- }
- 
- int APS5_VABI sceKernelStat(const char* path, FileStat* sb) {
--    if (path == nullptr) {
--        throw std::invalid_argument(std::string(__func__) + ": path is null");
--    }
--    if (sb == nullptr) {
--        throw std::invalid_argument(std::string(__func__) + ": sb is null");
--    }
-+    if (path == nullptr || sb == nullptr) return SceErrorFromErrno(14);
-     std::filesystem::path native;
-     try {
-         native = ResolvePath_nid_no_patch(path);
-     } catch (const std::filesystem::filesystem_error&) {
-         return SceErrorFromErrno(2);
-     }
--    std::error_code error;
--    constexpr int GuestEnotdir = 20;
--    const auto status = std::filesystem::status(native, error);
--    if (error == std::errc::not_a_directory) return SceErrorFromErrno(GuestEnotdir);
--    if (!std::filesystem::exists(status)) {
--        return SceErrorFromErrno(2);
-+    if (!File::FillFileStatPath(native, sb)) {
-+        return SceErrorFromErrno(errno);
-     }
-     const std::string_view guestPath(path);
--    if (!guestPath.empty() && guestPath.back() == '/' && !std::filesystem::is_directory(status)) return SceErrorFromErrno(GuestEnotdir);
--    File::FillFileStat(native, sb);
-+    if (!guestPath.empty() && guestPath.back() == '/' && (sb->st_mode & 0170000) != 0040000) return SceErrorFromErrno(20);
-     if (TraceFileIo()) std::fprintf(stderr, "[fileio] stat %s\n", path);
-     return 0;
- }
-diff --git a/AnyPS5/core/libs/prx/aps5native/CoreShim.cpp b/AnyPS5/core/libs/prx/aps5native/CoreShim.cpp
+diff --git a/core/libs/CMakeLists.txt b/core/libs/CMakeLists.txt
+index 532e06f3..c1064f5a 100644
+--- a/core/libs/CMakeLists.txt
++++ b/core/libs/CMakeLists.txt
+@@ -86,7 +86,7 @@ file(GLOB LIBS_DIRS LIST_DIRECTORIES true ${CMAKE_CURRENT_SOURCE_DIR}/prx/*)
+ list(REMOVE_ITEM LIBS_DIRS ${LIBC_DIR})
+ # Р‘РёР±Р»РёРѕС‚РµРєРё РЅР°С‚РёРІРЅРѕР№ РіСЂСѓРїРїС‹ (СЃРѕР±РёСЂР°СЋС‚СЃСЏ РїРѕРґ aarch64 Рё РІС‹Р·С‹РІР°СЋС‚СЃСЏ x86-Р·Р°РіР»СѓС€РєР°РјРё; СЃРј. aps5native).
+ # РЎРїРёСЃРѕРє РґРѕР»Р¶РµРЅ СЃРѕРІРїР°РґР°С‚СЊ СЃ GROUP РІ tools/gen_native_stubs.py.
+-set(APS5_GROUP_LIBS "^(libSceAgcDriver|libSceVideoOut|libScePad|libSceMouse|libSceKeyboard|libSceAudioOut)$")
++set(APS5_GROUP_LIBS "^(libSceAgcDriver|libSceVideoOut|libScePad|libSceMouse|libSceKeyboard|libSceAudioOut|libSceUserService|libSceSystemService|libSceRtc|libSceCommonDialog|libSceImeDialog|libSceRandom|libSceWebBrowserDialog)$")
+ # РњРѕСЃС‚ РЅР°С‚РёРІРЅРѕР№ РіСЂСѓРїРїС‹ (РЅРµ prx): shim СЏРґСЂР° РґР»СЏ РЅР°С‚РёРІРЅРѕР№ СЃР±РѕСЂРєРё Рё x86-СЃС‚РѕСЂРѕРЅР° РґР»СЏ СЌРјСѓР»РёСЂСѓРµРјРѕР№.
+ list(REMOVE_ITEM LIBS_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/prx/aps5native)
+ set(LIBS_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
+diff --git a/core/libs/prx/aps5native/CoreShim.cpp b/core/libs/prx/aps5native/CoreShim.cpp
 index 7dbb98be..070c4cde 100644
---- a/AnyPS5/core/libs/prx/aps5native/CoreShim.cpp
-+++ b/AnyPS5/core/libs/prx/aps5native/CoreShim.cpp
+--- a/core/libs/prx/aps5native/CoreShim.cpp
++++ b/core/libs/prx/aps5native/CoreShim.cpp
 @@ -16,6 +16,7 @@
  #include <chrono>
  #include <cstdio>
@@ -178,7 +25,7 @@ index 7dbb98be..070c4cde 100644
  #include <map>
 @@ -517,17 +518,32 @@ extern "C" void NotImplemented_nid_no_patch(const char* funcName) {
  
- // --- libkernel: ╨▓╤А╨╡╨╝╤П ╨╕ ╨╝╨╡╤В╨░╨┤╨░╨╜╨╜╤Л╨╡ ╨┐╤А╨╕╨╗╨╛╨╢╨╡╨╜╨╕╤П --------------------------------------------------
+ // --- libkernel: РІСЂРµРјСЏ Рё РјРµС‚Р°РґР°РЅРЅС‹Рµ РїСЂРёР»РѕР¶РµРЅРёСЏ --------------------------------------------------
  
 +namespace {
 +
@@ -213,26 +60,415 @@ index 7dbb98be..070c4cde 100644
  }
  
  extern "C" bool HasAppIcon_nid_postfix() {
-diff --git a/AnyPS5/core/libs/CMakeLists.txt b/AnyPS5/core/libs/CMakeLists.txt
-index 532e06f3..fc48222c 100644
---- a/AnyPS5/core/libs/CMakeLists.txt
-+++ b/AnyPS5/core/libs/CMakeLists.txt
-@@ -86,7 +86,7 @@ file(GLOB LIBS_DIRS LIST_DIRECTORIES true ${CMAKE_CURRENT_SOURCE_DIR}/prx/*)
- list(REMOVE_ITEM LIBS_DIRS ${LIBC_DIR})
- # ╨С╨╕╨▒╨╗╨╕╨╛╤В╨╡╨║╨╕ ╨╜╨░╤В╨╕╨▓╨╜╨╛╨╣ ╨│╤А╤Г╨┐╨┐╤Л (╤Б╨╛╨▒╨╕╤А╨░╤О╤В╤Б╤П ╨┐╨╛╨┤ aarch64 ╨╕ ╨▓╤Л╨╖╤Л╨▓╨░╤О╤В╤Б╤П x86-╨╖╨░╨│╨╗╤Г╤И╨║╨░╨╝╨╕; ╤Б╨╝. aps5native).
- # ╨б╨┐╨╕╤Б╨╛╨║ ╨┤╨╛╨╗╨╢╨╡╨╜ ╤Б╨╛╨▓╨┐╨░╨┤╨░╤В╤М ╤Б GROUP ╨▓ tools/gen_native_stubs.py.
--set(APS5_GROUP_LIBS "^(libSceAgcDriver|libSceVideoOut|libScePad|libSceMouse|libSceKeyboard|libSceAudioOut)$")
-+set(APS5_GROUP_LIBS "^(libSceAgcDriver|libSceVideoOut|libScePad|libSceMouse|libSceKeyboard|libSceAudioOut|libSceUserService|libSceSystemService)$")
- # ╨Ь╨╛╤Б╤В ╨╜╨░╤В╨╕╨▓╨╜╨╛╨╣ ╨│╤А╤Г╨┐╨┐╤Л (╨╜╨╡ prx): shim ╤П╨┤╤А╨░ ╨┤╨╗╤П ╨╜╨░╤В╨╕╨▓╨╜╨╛╨╣ ╤Б╨▒╨╛╤А╨║╨╕ ╨╕ x86-╤Б╤В╨╛╤А╨╛╨╜╨░ ╨┤╨╗╤П ╤Н╨╝╤Г╨╗╨╕╤А╤Г╨╡╨╝╨╛╨╣.
- list(REMOVE_ITEM LIBS_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/prx/aps5native)
- set(LIBS_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
-diff --git a/AnyPS5/core/libs/prx/aps5native/stubs/libSceSystemService.cpp b/AnyPS5/core/libs/prx/aps5native/stubs/libSceSystemService.cpp
+diff --git a/core/libs/prx/aps5native/stubs/libSceCommonDialog.cpp b/core/libs/prx/aps5native/stubs/libSceCommonDialog.cpp
+new file mode 100644
+index 00000000..491e7d76
+--- /dev/null
++++ b/core/libs/prx/aps5native/stubs/libSceCommonDialog.cpp
+@@ -0,0 +1,39 @@
++// РЎРіРµРЅРµСЂРёСЂРѕРІР°РЅРѕ tools/gen_native_stubs.py: x86-Р·Р°РіР»СѓС€РєР° libSceCommonDialog.prx, РїРµСЂРµР°РґСЂРµСЃСѓСЋС‰Р°СЏ РІС‹Р·РѕРІС‹
++// РІ РЅР°С‚РёРІРЅСѓСЋ (aarch64) СЃР±РѕСЂРєСѓ С‡РµСЂРµР· РјРѕСЃС‚ box64. РќРµ РїСЂР°РІРёС‚СЊ РІСЂСѓС‡РЅСѓСЋ.
++#include "prx/aps5native/X86Host.hpp"
++
++#include <cstdint>
++#include <cstring>
++
++namespace {
++
++[[maybe_unused]] double floatBits(float value) {
++    // float РїРµСЂРµРґР°С‘С‚СЃСЏ РІ РјР»Р°РґС€РёС… 32 Р±РёС‚Р°С… d-СЂРµРіРёСЃС‚СЂР° (РЅР°С‚РёРІРЅР°СЏ СЃС‚РѕСЂРѕРЅР° С‡РёС‚Р°РµС‚ s-СЂРµРіРёСЃС‚СЂ).
++    std::uint64_t bits = 0;
++    std::memcpy(&bits, &value, sizeof(value));
++    double result;
++    std::memcpy(&result, &bits, sizeof(result));
++    return result;
++}
++
++const char* const names[] = {
++    "sceCommonDialogInitialize",
++    "sceCommonDialogIsUsed",
++};
++void* functions[2] = {};
++
++__attribute__((constructor)) void loadNative() {
++    Aps5NativeResolve_nid_no_patch("libSceCommonDialog.prx", names, functions, 2);
++}
++
++} // namespace
++
++extern "C" std::uint64_t sceCommonDialogInitialize() {
++    if (functions[0] == nullptr) Aps5NativeMissing_nid_no_patch("sceCommonDialogInitialize");
++    return Aps5NativeCall_nid_no_patch(functions[0], 0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceCommonDialogIsUsed() {
++    if (functions[1] == nullptr) Aps5NativeMissing_nid_no_patch("sceCommonDialogIsUsed");
++    return Aps5NativeCall_nid_no_patch(functions[1], 0, 0, 0, 0, 0, 0, 0, 0);
++}
+diff --git a/core/libs/prx/aps5native/stubs/libSceImeDialog.cpp b/core/libs/prx/aps5native/stubs/libSceImeDialog.cpp
+new file mode 100644
+index 00000000..4420cc92
+--- /dev/null
++++ b/core/libs/prx/aps5native/stubs/libSceImeDialog.cpp
+@@ -0,0 +1,75 @@
++// РЎРіРµРЅРµСЂРёСЂРѕРІР°РЅРѕ tools/gen_native_stubs.py: x86-Р·Р°РіР»СѓС€РєР° libSceImeDialog.prx, РїРµСЂРµР°РґСЂРµСЃСѓСЋС‰Р°СЏ РІС‹Р·РѕРІС‹
++// РІ РЅР°С‚РёРІРЅСѓСЋ (aarch64) СЃР±РѕСЂРєСѓ С‡РµСЂРµР· РјРѕСЃС‚ box64. РќРµ РїСЂР°РІРёС‚СЊ РІСЂСѓС‡РЅСѓСЋ.
++#include "prx/aps5native/X86Host.hpp"
++
++#include <cstdint>
++#include <cstring>
++
++namespace {
++
++[[maybe_unused]] double floatBits(float value) {
++    // float РїРµСЂРµРґР°С‘С‚СЃСЏ РІ РјР»Р°РґС€РёС… 32 Р±РёС‚Р°С… d-СЂРµРіРёСЃС‚СЂР° (РЅР°С‚РёРІРЅР°СЏ СЃС‚РѕСЂРѕРЅР° С‡РёС‚Р°РµС‚ s-СЂРµРіРёСЃС‚СЂ).
++    std::uint64_t bits = 0;
++    std::memcpy(&bits, &value, sizeof(value));
++    double result;
++    std::memcpy(&result, &bits, sizeof(result));
++    return result;
++}
++
++const char* const names[] = {
++    "sceImeDialogAbort",
++    "sceImeDialogGetPanelPositionAndForm",
++    "sceImeDialogGetPanelSize",
++    "sceImeDialogGetPanelSizeExtended",
++    "sceImeDialogGetResult",
++    "sceImeDialogGetStatus",
++    "sceImeDialogInit",
++    "sceImeDialogTerm",
++};
++void* functions[8] = {};
++
++__attribute__((constructor)) void loadNative() {
++    Aps5NativeResolve_nid_no_patch("libSceImeDialog.prx", names, functions, 8);
++}
++
++} // namespace
++
++extern "C" std::uint64_t sceImeDialogAbort() {
++    if (functions[0] == nullptr) Aps5NativeMissing_nid_no_patch("sceImeDialogAbort");
++    return Aps5NativeCall_nid_no_patch(functions[0], 0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceImeDialogGetPanelPositionAndForm(std::uint64_t a0) {
++    if (functions[1] == nullptr) Aps5NativeMissing_nid_no_patch("sceImeDialogGetPanelPositionAndForm");
++    return Aps5NativeCall_nid_no_patch(functions[1], a0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceImeDialogGetPanelSize(std::uint64_t a0, std::uint64_t a1, std::uint64_t a2) {
++    if (functions[2] == nullptr) Aps5NativeMissing_nid_no_patch("sceImeDialogGetPanelSize");
++    return Aps5NativeCall_nid_no_patch(functions[2], a0, a1, a2, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceImeDialogGetPanelSizeExtended(std::uint64_t a0, std::uint64_t a1, std::uint64_t a2, std::uint64_t a3) {
++    if (functions[3] == nullptr) Aps5NativeMissing_nid_no_patch("sceImeDialogGetPanelSizeExtended");
++    return Aps5NativeCall_nid_no_patch(functions[3], a0, a1, a2, a3, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceImeDialogGetResult(std::uint64_t a0) {
++    if (functions[4] == nullptr) Aps5NativeMissing_nid_no_patch("sceImeDialogGetResult");
++    return Aps5NativeCall_nid_no_patch(functions[4], a0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceImeDialogGetStatus() {
++    if (functions[5] == nullptr) Aps5NativeMissing_nid_no_patch("sceImeDialogGetStatus");
++    return Aps5NativeCall_nid_no_patch(functions[5], 0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceImeDialogInit(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[6] == nullptr) Aps5NativeMissing_nid_no_patch("sceImeDialogInit");
++    return Aps5NativeCall_nid_no_patch(functions[6], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceImeDialogTerm() {
++    if (functions[7] == nullptr) Aps5NativeMissing_nid_no_patch("sceImeDialogTerm");
++    return Aps5NativeCall_nid_no_patch(functions[7], 0, 0, 0, 0, 0, 0, 0, 0);
++}
+diff --git a/core/libs/prx/aps5native/stubs/libSceRandom.cpp b/core/libs/prx/aps5native/stubs/libSceRandom.cpp
+new file mode 100644
+index 00000000..86d51a93
+--- /dev/null
++++ b/core/libs/prx/aps5native/stubs/libSceRandom.cpp
+@@ -0,0 +1,33 @@
++// РЎРіРµРЅРµСЂРёСЂРѕРІР°РЅРѕ tools/gen_native_stubs.py: x86-Р·Р°РіР»СѓС€РєР° libSceRandom.prx, РїРµСЂРµР°РґСЂРµСЃСѓСЋС‰Р°СЏ РІС‹Р·РѕРІС‹
++// РІ РЅР°С‚РёРІРЅСѓСЋ (aarch64) СЃР±РѕСЂРєСѓ С‡РµСЂРµР· РјРѕСЃС‚ box64. РќРµ РїСЂР°РІРёС‚СЊ РІСЂСѓС‡РЅСѓСЋ.
++#include "prx/aps5native/X86Host.hpp"
++
++#include <cstdint>
++#include <cstring>
++
++namespace {
++
++[[maybe_unused]] double floatBits(float value) {
++    // float РїРµСЂРµРґР°С‘С‚СЃСЏ РІ РјР»Р°РґС€РёС… 32 Р±РёС‚Р°С… d-СЂРµРіРёСЃС‚СЂР° (РЅР°С‚РёРІРЅР°СЏ СЃС‚РѕСЂРѕРЅР° С‡РёС‚Р°РµС‚ s-СЂРµРіРёСЃС‚СЂ).
++    std::uint64_t bits = 0;
++    std::memcpy(&bits, &value, sizeof(value));
++    double result;
++    std::memcpy(&result, &bits, sizeof(result));
++    return result;
++}
++
++const char* const names[] = {
++    "sceRandomGetRandomNumber",
++};
++void* functions[1] = {};
++
++__attribute__((constructor)) void loadNative() {
++    Aps5NativeResolve_nid_no_patch("libSceRandom.prx", names, functions, 1);
++}
++
++} // namespace
++
++extern "C" std::uint64_t sceRandomGetRandomNumber(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[0] == nullptr) Aps5NativeMissing_nid_no_patch("sceRandomGetRandomNumber");
++    return Aps5NativeCall_nid_no_patch(functions[0], a0, a1, 0, 0, 0, 0, 0, 0);
++}
+diff --git a/core/libs/prx/aps5native/stubs/libSceRtc.cpp b/core/libs/prx/aps5native/stubs/libSceRtc.cpp
+new file mode 100644
+index 00000000..5626cf8f
+--- /dev/null
++++ b/core/libs/prx/aps5native/stubs/libSceRtc.cpp
+@@ -0,0 +1,231 @@
++// РЎРіРµРЅРµСЂРёСЂРѕРІР°РЅРѕ tools/gen_native_stubs.py: x86-Р·Р°РіР»СѓС€РєР° libSceRtc.prx, РїРµСЂРµР°РґСЂРµСЃСѓСЋС‰Р°СЏ РІС‹Р·РѕРІС‹
++// РІ РЅР°С‚РёРІРЅСѓСЋ (aarch64) СЃР±РѕСЂРєСѓ С‡РµСЂРµР· РјРѕСЃС‚ box64. РќРµ РїСЂР°РІРёС‚СЊ РІСЂСѓС‡РЅСѓСЋ.
++#include "prx/aps5native/X86Host.hpp"
++
++#include <cstdint>
++#include <cstring>
++
++namespace {
++
++[[maybe_unused]] double floatBits(float value) {
++    // float РїРµСЂРµРґР°С‘С‚СЃСЏ РІ РјР»Р°РґС€РёС… 32 Р±РёС‚Р°С… d-СЂРµРіРёСЃС‚СЂР° (РЅР°С‚РёРІРЅР°СЏ СЃС‚РѕСЂРѕРЅР° С‡РёС‚Р°РµС‚ s-СЂРµРіРёСЃС‚СЂ).
++    std::uint64_t bits = 0;
++    std::memcpy(&bits, &value, sizeof(value));
++    double result;
++    std::memcpy(&result, &bits, sizeof(result));
++    return result;
++}
++
++const char* const names[] = {
++    "sceRtcCheckValid",
++    "sceRtcConvertLocalTimeToUtc",
++    "sceRtcConvertUtcToLocalTime",
++    "sceRtcFormatRFC2822",
++    "sceRtcFormatRFC2822LocalTime",
++    "sceRtcFormatRFC3339",
++    "sceRtcFormatRFC3339LocalTime",
++    "sceRtcGetCurrentClock",
++    "sceRtcGetCurrentClockLocalTime",
++    "sceRtcGetCurrentNetworkTick",
++    "sceRtcGetCurrentTick",
++    "sceRtcGetDayOfWeek",
++    "sceRtcGetDaysInMonth",
++    "sceRtcGetDosTime",
++    "sceRtcGetTick",
++    "sceRtcGetTickResolution",
++    "sceRtcGetTime_t",
++    "sceRtcGetWin32FileTime",
++    "sceRtcIsLeapYear",
++    "sceRtcParseDateTime",
++    "sceRtcParseRFC3339",
++    "sceRtcSetDosTime",
++    "sceRtcSetTick",
++    "sceRtcSetTime_t",
++    "sceRtcSetWin32FileTime",
++    "sceRtcTickAddDays",
++    "sceRtcTickAddHours",
++    "sceRtcTickAddMicroseconds",
++    "sceRtcTickAddMinutes",
++    "sceRtcTickAddMonths",
++    "sceRtcTickAddSeconds",
++    "sceRtcTickAddTicks",
++    "sceRtcTickAddWeeks",
++    "sceRtcTickAddYears",
++};
++void* functions[34] = {};
++
++__attribute__((constructor)) void loadNative() {
++    Aps5NativeResolve_nid_no_patch("libSceRtc.prx", names, functions, 34);
++}
++
++} // namespace
++
++extern "C" std::uint64_t sceRtcCheckValid(std::uint64_t a0) {
++    if (functions[0] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcCheckValid");
++    return Aps5NativeCall_nid_no_patch(functions[0], a0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceRtcConvertLocalTimeToUtc(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[1] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcConvertLocalTimeToUtc");
++    return Aps5NativeCall_nid_no_patch(functions[1], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceRtcConvertUtcToLocalTime(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[2] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcConvertUtcToLocalTime");
++    return Aps5NativeCall_nid_no_patch(functions[2], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceRtcFormatRFC2822(std::uint64_t a0, std::uint64_t a1, std::uint64_t a2) {
++    if (functions[3] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcFormatRFC2822");
++    return Aps5NativeCall_nid_no_patch(functions[3], a0, a1, a2, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceRtcFormatRFC2822LocalTime(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[4] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcFormatRFC2822LocalTime");
++    return Aps5NativeCall_nid_no_patch(functions[4], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceRtcFormatRFC3339(std::uint64_t a0, std::uint64_t a1, std::uint64_t a2) {
++    if (functions[5] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcFormatRFC3339");
++    return Aps5NativeCall_nid_no_patch(functions[5], a0, a1, a2, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceRtcFormatRFC3339LocalTime(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[6] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcFormatRFC3339LocalTime");
++    return Aps5NativeCall_nid_no_patch(functions[6], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceRtcGetCurrentClock(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[7] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcGetCurrentClock");
++    return Aps5NativeCall_nid_no_patch(functions[7], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceRtcGetCurrentClockLocalTime(std::uint64_t a0) {
++    if (functions[8] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcGetCurrentClockLocalTime");
++    return Aps5NativeCall_nid_no_patch(functions[8], a0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceRtcGetCurrentNetworkTick(std::uint64_t a0) {
++    if (functions[9] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcGetCurrentNetworkTick");
++    return Aps5NativeCall_nid_no_patch(functions[9], a0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceRtcGetCurrentTick(std::uint64_t a0) {
++    if (functions[10] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcGetCurrentTick");
++    return Aps5NativeCall_nid_no_patch(functions[10], a0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceRtcGetDayOfWeek(std::uint64_t a0, std::uint64_t a1, std::uint64_t a2) {
++    if (functions[11] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcGetDayOfWeek");
++    return Aps5NativeCall_nid_no_patch(functions[11], a0, a1, a2, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceRtcGetDaysInMonth(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[12] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcGetDaysInMonth");
++    return Aps5NativeCall_nid_no_patch(functions[12], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceRtcGetDosTime(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[13] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcGetDosTime");
++    return Aps5NativeCall_nid_no_patch(functions[13], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceRtcGetTick(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[14] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcGetTick");
++    return Aps5NativeCall_nid_no_patch(functions[14], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceRtcGetTickResolution() {
++    if (functions[15] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcGetTickResolution");
++    return Aps5NativeCall_nid_no_patch(functions[15], 0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceRtcGetTime_t(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[16] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcGetTime_t");
++    return Aps5NativeCall_nid_no_patch(functions[16], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceRtcGetWin32FileTime(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[17] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcGetWin32FileTime");
++    return Aps5NativeCall_nid_no_patch(functions[17], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceRtcIsLeapYear(std::uint64_t a0) {
++    if (functions[18] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcIsLeapYear");
++    return Aps5NativeCall_nid_no_patch(functions[18], a0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceRtcParseDateTime(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[19] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcParseDateTime");
++    return Aps5NativeCall_nid_no_patch(functions[19], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceRtcParseRFC3339(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[20] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcParseRFC3339");
++    return Aps5NativeCall_nid_no_patch(functions[20], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceRtcSetDosTime(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[21] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcSetDosTime");
++    return Aps5NativeCall_nid_no_patch(functions[21], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceRtcSetTick(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[22] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcSetTick");
++    return Aps5NativeCall_nid_no_patch(functions[22], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceRtcSetTime_t(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[23] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcSetTime_t");
++    return Aps5NativeCall_nid_no_patch(functions[23], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceRtcSetWin32FileTime(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[24] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcSetWin32FileTime");
++    return Aps5NativeCall_nid_no_patch(functions[24], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceRtcTickAddDays(std::uint64_t a0, std::uint64_t a1, std::uint64_t a2) {
++    if (functions[25] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcTickAddDays");
++    return Aps5NativeCall_nid_no_patch(functions[25], a0, a1, a2, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceRtcTickAddHours(std::uint64_t a0, std::uint64_t a1, std::uint64_t a2) {
++    if (functions[26] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcTickAddHours");
++    return Aps5NativeCall_nid_no_patch(functions[26], a0, a1, a2, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceRtcTickAddMicroseconds(std::uint64_t a0, std::uint64_t a1, std::uint64_t a2) {
++    if (functions[27] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcTickAddMicroseconds");
++    return Aps5NativeCall_nid_no_patch(functions[27], a0, a1, a2, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceRtcTickAddMinutes(std::uint64_t a0, std::uint64_t a1, std::uint64_t a2) {
++    if (functions[28] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcTickAddMinutes");
++    return Aps5NativeCall_nid_no_patch(functions[28], a0, a1, a2, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceRtcTickAddMonths(std::uint64_t a0, std::uint64_t a1, std::uint64_t a2) {
++    if (functions[29] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcTickAddMonths");
++    return Aps5NativeCall_nid_no_patch(functions[29], a0, a1, a2, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceRtcTickAddSeconds(std::uint64_t a0, std::uint64_t a1, std::uint64_t a2) {
++    if (functions[30] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcTickAddSeconds");
++    return Aps5NativeCall_nid_no_patch(functions[30], a0, a1, a2, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceRtcTickAddTicks(std::uint64_t a0, std::uint64_t a1, std::uint64_t a2) {
++    if (functions[31] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcTickAddTicks");
++    return Aps5NativeCall_nid_no_patch(functions[31], a0, a1, a2, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceRtcTickAddWeeks(std::uint64_t a0, std::uint64_t a1, std::uint64_t a2) {
++    if (functions[32] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcTickAddWeeks");
++    return Aps5NativeCall_nid_no_patch(functions[32], a0, a1, a2, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceRtcTickAddYears(std::uint64_t a0, std::uint64_t a1, std::uint64_t a2) {
++    if (functions[33] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcTickAddYears");
++    return Aps5NativeCall_nid_no_patch(functions[33], a0, a1, a2, 0, 0, 0, 0, 0);
++}
+diff --git a/core/libs/prx/aps5native/stubs/libSceSystemService.cpp b/core/libs/prx/aps5native/stubs/libSceSystemService.cpp
 new file mode 100644
 index 00000000..ff8d9a7f
 --- /dev/null
-+++ b/AnyPS5/core/libs/prx/aps5native/stubs/libSceSystemService.cpp
++++ b/core/libs/prx/aps5native/stubs/libSceSystemService.cpp
 @@ -0,0 +1,173 @@
-+// x86-╨╖╨░╨│╨╗╤Г╤И╨║╨░ libSceSystemService.prx, ╨┐╨╡╤А╨╡╨░╨┤╤А╨╡╤Б╤Г╤О╤Й╨░╤П ╨▓╤Л╨╖╨╛╨▓╤Л ╨▓ ╨╜╨░╤В╨╕╨▓╨╜╤Г╤О (aarch64) ╤Б╨▒╨╛╤А╨║╤Г ╤З╨╡╤А╨╡╨╖ ╨╝╨╛╤Б╤В box64.
++// x86-Р·Р°РіР»СѓС€РєР° libSceSystemService.prx, РїРµСЂРµР°РґСЂРµСЃСѓСЋС‰Р°СЏ РІС‹Р·РѕРІС‹ РІ РЅР°С‚РёРІРЅСѓСЋ (aarch64) СЃР±РѕСЂРєСѓ С‡РµСЂРµР· РјРѕСЃС‚ box64.
 +#include "prx/aps5native/X86Host.hpp"
 +
 +#include <cstdint>
@@ -405,13 +641,13 @@ index 00000000..ff8d9a7f
 +    if (functions[25] == nullptr) Aps5NativeMissing_nid_no_patch("sceSystemServiceShowControllerSettings");
 +    return Aps5NativeCall_nid_no_patch(functions[25], 0, 0, 0, 0, 0, 0, 0, 0);
 +}
-diff --git a/AnyPS5/core/libs/prx/aps5native/stubs/libSceUserService.cpp b/AnyPS5/core/libs/prx/aps5native/stubs/libSceUserService.cpp
+diff --git a/core/libs/prx/aps5native/stubs/libSceUserService.cpp b/core/libs/prx/aps5native/stubs/libSceUserService.cpp
 new file mode 100644
 index 00000000..bb9f6277
 --- /dev/null
-+++ b/AnyPS5/core/libs/prx/aps5native/stubs/libSceUserService.cpp
++++ b/core/libs/prx/aps5native/stubs/libSceUserService.cpp
 @@ -0,0 +1,143 @@
-+// x86-╨╖╨░╨│╨╗╤Г╤И╨║╨░ libSceUserService.prx, ╨┐╨╡╤А╨╡╨░╨┤╤А╨╡╤Б╤Г╤О╤Й╨░╤П ╨▓╤Л╨╖╨╛╨▓╤Л ╨▓ ╨╜╨░╤В╨╕╨▓╨╜╤Г╤О (aarch64) ╤Б╨▒╨╛╤А╨║╤Г ╤З╨╡╤А╨╡╨╖ ╨╝╨╛╤Б╤В box64.
++// x86-Р·Р°РіР»СѓС€РєР° libSceUserService.prx, РїРµСЂРµР°РґСЂРµСЃСѓСЋС‰Р°СЏ РІС‹Р·РѕРІС‹ РІ РЅР°С‚РёРІРЅСѓСЋ (aarch64) СЃР±РѕСЂРєСѓ С‡РµСЂРµР· РјРѕСЃС‚ box64.
 +#include "prx/aps5native/X86Host.hpp"
 +
 +#include <cstdint>
@@ -554,16 +790,252 @@ index 00000000..bb9f6277
 +    if (functions[20] == nullptr) Aps5NativeMissing_nid_no_patch("sceUserServiceTerminate");
 +    return Aps5NativeCall_nid_no_patch(functions[20], 0, 0, 0, 0, 0, 0, 0, 0);
 +}
-diff --git a/AnyPS5/tools/gen_native_stubs.py b/AnyPS5/tools/gen_native_stubs.py
-index 07b867cc..b7d4e6cd 100644
---- a/AnyPS5/tools/gen_native_stubs.py
-+++ b/AnyPS5/tools/gen_native_stubs.py
-@@ -27,6 +27,8 @@ GROUP = {
+diff --git a/core/libs/prx/aps5native/stubs/libSceWebBrowserDialog.cpp b/core/libs/prx/aps5native/stubs/libSceWebBrowserDialog.cpp
+new file mode 100644
+index 00000000..bab50d4b
+--- /dev/null
++++ b/core/libs/prx/aps5native/stubs/libSceWebBrowserDialog.cpp
+@@ -0,0 +1,87 @@
++// РЎРіРµРЅРµСЂРёСЂРѕРІР°РЅРѕ tools/gen_native_stubs.py: x86-Р·Р°РіР»СѓС€РєР° libSceWebBrowserDialog.prx, РїРµСЂРµР°РґСЂРµСЃСѓСЋС‰Р°СЏ РІС‹Р·РѕРІС‹
++// РІ РЅР°С‚РёРІРЅСѓСЋ (aarch64) СЃР±РѕСЂРєСѓ С‡РµСЂРµР· РјРѕСЃС‚ box64. РќРµ РїСЂР°РІРёС‚СЊ РІСЂСѓС‡РЅСѓСЋ.
++#include "prx/aps5native/X86Host.hpp"
++
++#include <cstdint>
++#include <cstring>
++
++namespace {
++
++[[maybe_unused]] double floatBits(float value) {
++    // float РїРµСЂРµРґР°С‘С‚СЃСЏ РІ РјР»Р°РґС€РёС… 32 Р±РёС‚Р°С… d-СЂРµРіРёСЃС‚СЂР° (РЅР°С‚РёРІРЅР°СЏ СЃС‚РѕСЂРѕРЅР° С‡РёС‚Р°РµС‚ s-СЂРµРіРёСЃС‚СЂ).
++    std::uint64_t bits = 0;
++    std::memcpy(&bits, &value, sizeof(value));
++    double result;
++    std::memcpy(&result, &bits, sizeof(result));
++    return result;
++}
++
++const char* const names[] = {
++    "sceWebBrowserDialogClose",
++    "sceWebBrowserDialogGetResult",
++    "sceWebBrowserDialogGetStatus",
++    "sceWebBrowserDialogInitialize",
++    "sceWebBrowserDialogOpen",
++    "sceWebBrowserDialogOpenForPredeterminedContent",
++    "sceWebBrowserDialogResetCookie",
++    "sceWebBrowserDialogSetCookie",
++    "sceWebBrowserDialogTerminate",
++    "sceWebBrowserDialogUpdateStatus",
++};
++void* functions[10] = {};
++
++__attribute__((constructor)) void loadNative() {
++    Aps5NativeResolve_nid_no_patch("libSceWebBrowserDialog.prx", names, functions, 10);
++}
++
++} // namespace
++
++extern "C" std::uint64_t sceWebBrowserDialogClose() {
++    if (functions[0] == nullptr) Aps5NativeMissing_nid_no_patch("sceWebBrowserDialogClose");
++    return Aps5NativeCall_nid_no_patch(functions[0], 0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceWebBrowserDialogGetResult(std::uint64_t a0) {
++    if (functions[1] == nullptr) Aps5NativeMissing_nid_no_patch("sceWebBrowserDialogGetResult");
++    return Aps5NativeCall_nid_no_patch(functions[1], a0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceWebBrowserDialogGetStatus() {
++    if (functions[2] == nullptr) Aps5NativeMissing_nid_no_patch("sceWebBrowserDialogGetStatus");
++    return Aps5NativeCall_nid_no_patch(functions[2], 0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceWebBrowserDialogInitialize() {
++    if (functions[3] == nullptr) Aps5NativeMissing_nid_no_patch("sceWebBrowserDialogInitialize");
++    return Aps5NativeCall_nid_no_patch(functions[3], 0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceWebBrowserDialogOpen(std::uint64_t a0) {
++    if (functions[4] == nullptr) Aps5NativeMissing_nid_no_patch("sceWebBrowserDialogOpen");
++    return Aps5NativeCall_nid_no_patch(functions[4], a0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceWebBrowserDialogOpenForPredeterminedContent() {
++    if (functions[5] == nullptr) Aps5NativeMissing_nid_no_patch("sceWebBrowserDialogOpenForPredeterminedContent");
++    return Aps5NativeCall_nid_no_patch(functions[5], 0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceWebBrowserDialogResetCookie() {
++    if (functions[6] == nullptr) Aps5NativeMissing_nid_no_patch("sceWebBrowserDialogResetCookie");
++    return Aps5NativeCall_nid_no_patch(functions[6], 0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceWebBrowserDialogSetCookie() {
++    if (functions[7] == nullptr) Aps5NativeMissing_nid_no_patch("sceWebBrowserDialogSetCookie");
++    return Aps5NativeCall_nid_no_patch(functions[7], 0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceWebBrowserDialogTerminate() {
++    if (functions[8] == nullptr) Aps5NativeMissing_nid_no_patch("sceWebBrowserDialogTerminate");
++    return Aps5NativeCall_nid_no_patch(functions[8], 0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceWebBrowserDialogUpdateStatus() {
++    if (functions[9] == nullptr) Aps5NativeMissing_nid_no_patch("sceWebBrowserDialogUpdateStatus");
++    return Aps5NativeCall_nid_no_patch(functions[9], 0, 0, 0, 0, 0, 0, 0, 0);
++}
+diff --git a/core/libs/prx/libc/src/General.cpp b/core/libs/prx/libc/src/General.cpp
+index 86e747ca..ab17e067 100644
+--- a/core/libs/prx/libc/src/General.cpp
++++ b/core/libs/prx/libc/src/General.cpp
+@@ -103,7 +103,13 @@ std::optional<std::filesystem::path> ResolveAlias(const std::string& guestPath)
+     for (const auto& [prefix, host] : aliases.entries) {
+         if (!HasPrefix(relative, prefix)) continue;
+         if (relative.size() == prefix.size()) return std::filesystem::path(host).make_preferred();
+-        std::filesystem::path result = ResolveHostPath(host, relative.substr(prefix.size() + 1));
++        const auto sub = relative.substr(prefix.size() + 1);
++        const auto direct = std::filesystem::path(host) / sub;
++        std::error_code ec;
++        if (std::filesystem::exists(direct, ec) || std::filesystem::exists(direct.parent_path(), ec)) {
++            return direct.make_preferred();
++        }
++        std::filesystem::path result = ResolveHostPath(host, sub);
+         return result.make_preferred();
+     }
+     return std::nullopt;
+@@ -305,6 +311,11 @@ extern "C" std::filesystem::path ResolvePath_nid_no_patch(const char* path) {
+         const char* sub = path[5] == '/' ? path + 6 : "";
+         return state.root / sub;
+     }
++    if (path[0] == '/' && path[1] == 's' && path[2] == 'a' && path[3] == 'v' && path[4] == 'e' && path[5] == 'd' && path[6] == 'a' && path[7] == 't' && path[8] == 'a' && (path[9] >= '0' && path[9] <= '9') && (path[10] == '/' || path[10] == '\0')) {
++        auto& state = Directories();
++        const char* sub = path[10] == '/' ? path + 11 : "";
++        return state.root / "_sd" / "SDLStorage" / sub;
++    }
+     auto& state = Directories();
+     std::lock_guard lock(state.mutex);
+     return Resolve(state, path);
+diff --git a/core/libs/prx/libkernel/File/include/NativeStat.hpp b/core/libs/prx/libkernel/File/include/NativeStat.hpp
+index 5715f021..d5ac2196 100644
+--- a/core/libs/prx/libkernel/File/include/NativeStat.hpp
++++ b/core/libs/prx/libkernel/File/include/NativeStat.hpp
+@@ -7,6 +7,7 @@
+ namespace File {
+ 
+ void FillFileStat(const std::filesystem::path& nativePath, FileStat* sb);
++bool FillFileStatPath(const std::filesystem::path& nativePath, FileStat* sb);
+ void FillFileStat(int nativeDescriptor, FileStat* sb);
+ bool FillFileStatFromDescriptor(int fd, FileStat* sb);
+ bool FillLinkStat(const std::filesystem::path& nativePath, FileStat* sb);
+diff --git a/core/libs/prx/libkernel/File/src/NativeStat.cpp b/core/libs/prx/libkernel/File/src/NativeStat.cpp
+index 5454db47..0ea61eda 100644
+--- a/core/libs/prx/libkernel/File/src/NativeStat.cpp
++++ b/core/libs/prx/libkernel/File/src/NativeStat.cpp
+@@ -132,6 +132,13 @@ void FillFileStat(const std::filesystem::path& nativePath, FileStat* sb) {
+     CopyNativeStat(st, sb);
+ }
+ 
++bool FillFileStatPath(const std::filesystem::path& nativePath, FileStat* sb) {
++    NativeStat st{};
++    if (DoStat(nativePath, &st) != 0) return false;
++    CopyNativeStat(st, sb);
++    return true;
++}
++
+ void FillFileStat(int nativeDescriptor, FileStat* sb) {
+     NativeStat st{};
+     if (DoFstat(nativeDescriptor, &st) != 0) {
+diff --git a/core/libs/prx/libkernel/File/src/Open.cpp b/core/libs/prx/libkernel/File/src/Open.cpp
+index 7c69636b..e4cc3281 100644
+--- a/core/libs/prx/libkernel/File/src/Open.cpp
++++ b/core/libs/prx/libkernel/File/src/Open.cpp
+@@ -217,28 +217,18 @@ std::int64_t APS5_VABI sceKernelLseek(int d, std::int64_t offset, int whence) {
+ }
+ 
+ int APS5_VABI sceKernelStat(const char* path, FileStat* sb) {
+-    if (path == nullptr) {
+-        throw std::invalid_argument(std::string(__func__) + ": path is null");
+-    }
+-    if (sb == nullptr) {
+-        throw std::invalid_argument(std::string(__func__) + ": sb is null");
+-    }
++    if (path == nullptr || sb == nullptr) return SceErrorFromErrno(14);
+     std::filesystem::path native;
+     try {
+         native = ResolvePath_nid_no_patch(path);
+     } catch (const std::filesystem::filesystem_error&) {
+         return SceErrorFromErrno(2);
+     }
+-    std::error_code error;
+-    constexpr int GuestEnotdir = 20;
+-    const auto status = std::filesystem::status(native, error);
+-    if (error == std::errc::not_a_directory) return SceErrorFromErrno(GuestEnotdir);
+-    if (!std::filesystem::exists(status)) {
+-        return SceErrorFromErrno(2);
++    if (!File::FillFileStatPath(native, sb)) {
++        return SceErrorFromErrno(errno);
+     }
+     const std::string_view guestPath(path);
+-    if (!guestPath.empty() && guestPath.back() == '/' && !std::filesystem::is_directory(status)) return SceErrorFromErrno(GuestEnotdir);
+-    File::FillFileStat(native, sb);
++    if (!guestPath.empty() && guestPath.back() == '/' && (sb->st_mode & 0170000) != 0040000) return SceErrorFromErrno(20);
+     if (TraceFileIo()) std::fprintf(stderr, "[fileio] stat %s\n", path);
+     return 0;
+ }
+diff --git a/tools/gen_native_stubs.py b/tools/gen_native_stubs.py
+index 07b867cc..e642af29 100644
+--- a/tools/gen_native_stubs.py
++++ b/tools/gen_native_stubs.py
+@@ -27,6 +27,13 @@ GROUP = {
      "libSceMouse": ["libSceMouse"],
      "libSceKeyboard": ["libSceKeyboard"],
      "libSceAudioOut": ["libSceAudioOut"],
 +    "libSceUserService": ["libSceUserService"],
 +    "libSceSystemService": ["libSceSystemService"],
++    "libSceRtc": ["libSceRtc"],
++    "libSceCommonDialog": ["libSceCommonDialog"],
++    "libSceImeDialog": ["libSceImeDialog"],
++    "libSceRandom": ["libSceRandom"],
++    "libSceWebBrowserDialog": ["libSceWebBrowserDialog"],
  }
  
- # ╨Т╨╜╤Г╤В╤А╨╡╨╜╨╜╨╛╤Б╤В╨╕ ╤Б╤В╨░╤В╨╕╤З╨╡╤Б╨║╨╛╨│╨╛ SDL ╨╕ ╨┐╤А╨╛╤З╨╕╨╡ ╨╜╨╡-API ╤Н╨║╤Б╨┐╨╛╤А╤В╤Л.
+ # Р’РЅСѓС‚СЂРµРЅРЅРѕСЃС‚Рё СЃС‚Р°С‚РёС‡РµСЃРєРѕРіРѕ SDL Рё РїСЂРѕС‡РёРµ РЅРµ-API СЌРєСЃРїРѕСЂС‚С‹.
+@@ -44,14 +51,22 @@ FLOAT_WORDS = {"float"}
+ DOUBLE_WORDS = {"double"}
+ 
+ 
+-def exports(prx):
+-    out = subprocess.run(["llvm-nm", "-D", "--defined-only", prx], capture_output=True, text=True, check=True).stdout
+-    names = []
+-    for line in out.splitlines():
+-        parts = line.split()
+-        if len(parts) == 3 and parts[1] in ("T", "W") and not SKIP.search(parts[2]):
+-            names.append(parts[2].split("@")[0])
+-    return sorted(set(names))
++def exports(prx, fallback_sources=None):
++    try:
++        out = subprocess.run(["llvm-nm", "-D", "--defined-only", prx], capture_output=True, text=True, check=True).stdout
++        names = []
++        for line in out.splitlines():
++            parts = line.split()
++            if len(parts) == 3 and parts[1] in ("T", "W") and not SKIP.search(parts[2]):
++                names.append(parts[2].split("@")[0])
++        return sorted(set(names))
++    except Exception:
++        if fallback_sources:
++            names = []
++            for text in fallback_sources.values():
++                names += re.findall(r"\bAPS5_VABI\s+([A-Za-z0-9_]+)\s*\(", text)
++            return sorted(set(names))
++        raise
+ 
+ 
+ def read_sources(root):
+@@ -287,7 +302,7 @@ def main():
+     typedefs = collect_typedefs(all_texts)
+     status = 0
+     for library in GROUP:
+-        names = exports(os.path.join(unpatched, f"{library}.prx"))
++        names = exports(os.path.join(unpatched, f"{library}.prx"), fallback_sources=per_lib[library])
+         kept, problems = generate(library, names, per_lib[library], typedefs, manual, out_dir, library == "libSceAgcDriver")
+         print(f"{library}: {len(kept)} Р·Р°РіР»СѓС€РµРє, {len(problems)} С‚СЂРµР±СѓСЋС‚ РІРЅРёРјР°РЅРёСЏ")
+         for name, why in problems:

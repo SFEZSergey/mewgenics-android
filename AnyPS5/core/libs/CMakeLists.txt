@@ -86,7 +86,7 @@ file(GLOB LIBS_DIRS LIST_DIRECTORIES true ${CMAKE_CURRENT_SOURCE_DIR}/prx/*)
 list(REMOVE_ITEM LIBS_DIRS ${LIBC_DIR})
 # Библиотеки нативной группы (собираются под aarch64 и вызываются x86-заглушками; см. aps5native).
 # Список должен совпадать с GROUP в tools/gen_native_stubs.py.
-set(APS5_GROUP_LIBS "^(libSceAgcDriver|libSceVideoOut|libScePad|libSceMouse|libSceKeyboard|libSceAudioOut|libSceUserService|libSceSystemService)$")
+set(APS5_GROUP_LIBS "^(libSceAgcDriver|libSceVideoOut|libScePad|libSceMouse|libSceKeyboard|libSceAudioOut|libSceUserService|libSceSystemService|libSceRtc|libSceCommonDialog|libSceImeDialog|libSceRandom|libSceWebBrowserDialog)$")
 # Мост нативной группы (не prx): shim ядра для нативной сборки и x86-сторона для эмулируемой.
 list(REMOVE_ITEM LIBS_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/prx/aps5native)
 set(LIBS_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
