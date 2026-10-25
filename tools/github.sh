@@ -13,13 +13,20 @@ ok()   { echo -e "\033[32m[OK]\033[0m $*"; }
 fail() { echo -e "\033[31m[FAIL]\033[0m $*"; }
 
 # 0. Пути (первый существующий вариант)
-REPO_DIR="${REPO_DIR:-$HOME/ps5-android/pvz-replanted-android}"
-[ -d "$REPO_DIR" ] || REPO_DIR="$HOME/pvz-replanted-android"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+[ -f "$SCRIPT_DIR/README.md" ] && SELF_REPO="$SCRIPT_DIR" || SELF_REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+for cand in "${REPO_DIR:-}" "$HOME/mewgenics-android" "$SELF_REPO" "$HOME/ps5-android/pvz-replanted-android" "$HOME/pvz-replanted-android"; do
+  if [ -n "$cand" ] && [ -d "$cand" ]; then REPO_DIR="$cand"; break; fi
+done
 A="${ANYPS5_DIR:-$HOME/ps5-android/src/AnyPS5}"
 [ -d "$A" ] || A="$HOME/ps5-android/AnyPS5"
+[ -d "$A" ] || A="$REPO_DIR/AnyPS5"
 MESA="${MESA_DIR:-$HOME/ps5-android/src/mesa-26.3}"
+[ -d "$MESA" ] || MESA="$REPO_DIR/mesa"
 MESA_BUILD="${MESA_BUILD:-$MESA/build-android}"
 APK_DIR="${APK_DIR:-$HOME/ps5-android/apk}"
+[ -d "$APK_DIR" ] || APK_DIR="$REPO_DIR/android"
 GAME_ID="${GAME_ID:-PPSA37318}"
 P="$REPO_DIR/patches"
 
@@ -113,6 +120,13 @@ fi
 if [ "$GAME_ID" = PPSA37318 ] && [ "${MEW_NATIVE:-1}" = 1 ]; then
   echo "=== Mewgenics: нативные правки app.elf ==="
   su -c "sh '$REPO_DIR/tools/mew-native.sh'" | tail -n 5
+fi
+
+# 8b. Mewgenics: патч атласа растровых заливок SWF 4096 (защита от вылета вступительных роликов глав).
+#     Только при закрытой игре. Откат: su -c 'sh <репозиторий>/tools/mew-atlas.sh undo'. MEW_ATLAS=0 — пропустить.
+if [ "$GAME_ID" = PPSA37318 ] && [ "${MEW_ATLAS:-1}" = 1 ]; then
+  echo "=== Mewgenics: фиксация атласа 4096 ==="
+  su -c "sh '$REPO_DIR/tools/mew-atlas.sh'" | tail -n 5
 fi
 
 # 9. Mewgenics: SPIR-V для нативного Vulkan SDL_GPU (APS5_SDLGPU_VULKAN=1): таблица <игра>/sdlgpu из шейдеров
