@@ -1,5 +1,5 @@
 diff --git a/core/libs/CMakeLists.txt b/core/libs/CMakeLists.txt
-index 532e06f3..c1064f5a 100644
+index 532e06f3..3414de80 100644
 --- a/core/libs/CMakeLists.txt
 +++ b/core/libs/CMakeLists.txt
 @@ -86,7 +86,7 @@ file(GLOB LIBS_DIRS LIST_DIRECTORIES true ${CMAKE_CURRENT_SOURCE_DIR}/prx/*)
@@ -7,7 +7,7 @@ index 532e06f3..c1064f5a 100644
  # Р‘РёР±Р»РёРѕС‚РµРєРё РЅР°С‚РёРІРЅРѕР№ РіСЂСѓРїРїС‹ (СЃРѕР±РёСЂР°СЋС‚СЃСЏ РїРѕРґ aarch64 Рё РІС‹Р·С‹РІР°СЋС‚СЃСЏ x86-Р·Р°РіР»СѓС€РєР°РјРё; СЃРј. aps5native).
  # РЎРїРёСЃРѕРє РґРѕР»Р¶РµРЅ СЃРѕРІРїР°РґР°С‚СЊ СЃ GROUP РІ tools/gen_native_stubs.py.
 -set(APS5_GROUP_LIBS "^(libSceAgcDriver|libSceVideoOut|libScePad|libSceMouse|libSceKeyboard|libSceAudioOut)$")
-+set(APS5_GROUP_LIBS "^(libSceAgcDriver|libSceVideoOut|libScePad|libSceMouse|libSceKeyboard|libSceAudioOut|libSceUserService|libSceSystemService|libSceRtc|libSceCommonDialog|libSceImeDialog|libSceRandom|libSceWebBrowserDialog)$")
++set(APS5_GROUP_LIBS "^(libSceAgcDriver|libSceVideoOut|libScePad|libSceMouse|libSceKeyboard|libSceAudioOut|libSceUserService|libSceSystemService|libSceRtc|libSceCommonDialog|libSceImeDialog|libSceRandom|libSceWebBrowserDialog|libSceNetCtl|libSceAudioIn|libSceSaveData\\.native|libSceSaveDataDialog\\.native)$")
  # РњРѕСЃС‚ РЅР°С‚РёРІРЅРѕР№ РіСЂСѓРїРїС‹ (РЅРµ prx): shim СЏРґСЂР° РґР»СЏ РЅР°С‚РёРІРЅРѕР№ СЃР±РѕСЂРєРё Рё x86-СЃС‚РѕСЂРѕРЅР° РґР»СЏ СЌРјСѓР»РёСЂСѓРµРјРѕР№.
  list(REMOVE_ITEM LIBS_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/prx/aps5native)
  set(LIBS_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
@@ -60,6 +60,87 @@ index 7dbb98be..070c4cde 100644
  }
  
  extern "C" bool HasAppIcon_nid_postfix() {
+diff --git a/core/libs/prx/aps5native/stubs/libSceAudioIn.cpp b/core/libs/prx/aps5native/stubs/libSceAudioIn.cpp
+new file mode 100644
+index 00000000..484d973c
+--- /dev/null
++++ b/core/libs/prx/aps5native/stubs/libSceAudioIn.cpp
+@@ -0,0 +1,75 @@
++// РЎРіРµРЅРµСЂРёСЂРѕРІР°РЅРѕ tools/gen_native_stubs.py: x86-Р·Р°РіР»СѓС€РєР° libSceAudioIn.prx, РїРµСЂРµР°РґСЂРµСЃСѓСЋС‰Р°СЏ РІС‹Р·РѕРІС‹
++// РІ РЅР°С‚РёРІРЅСѓСЋ (aarch64) СЃР±РѕСЂРєСѓ С‡РµСЂРµР· РјРѕСЃС‚ box64. РќРµ РїСЂР°РІРёС‚СЊ РІСЂСѓС‡РЅСѓСЋ.
++#include "prx/aps5native/X86Host.hpp"
++
++#include <cstdint>
++#include <cstring>
++
++namespace {
++
++[[maybe_unused]] double floatBits(float value) {
++    // float РїРµСЂРµРґР°С‘С‚СЃСЏ РІ РјР»Р°РґС€РёС… 32 Р±РёС‚Р°С… d-СЂРµРіРёСЃС‚СЂР° (РЅР°С‚РёРІРЅР°СЏ СЃС‚РѕСЂРѕРЅР° С‡РёС‚Р°РµС‚ s-СЂРµРіРёСЃС‚СЂ).
++    std::uint64_t bits = 0;
++    std::memcpy(&bits, &value, sizeof(value));
++    double result;
++    std::memcpy(&result, &bits, sizeof(result));
++    return result;
++}
++
++const char* const names[] = {
++    "sceAudioInAsyncOpen",
++    "sceAudioInClose",
++    "sceAudioInGetSilentState",
++    "sceAudioInHqOpen",
++    "sceAudioInInit",
++    "sceAudioInInput",
++    "sceAudioInOpen",
++    "sceAudioInUnknown_X4jdIS75P0",
++};
++void* functions[8] = {};
++
++__attribute__((constructor)) void loadNative() {
++    Aps5NativeResolve_nid_no_patch("libSceAudioIn.prx", names, functions, 8);
++}
++
++} // namespace
++
++extern "C" std::uint64_t sceAudioInAsyncOpen(std::uint64_t a0, std::uint64_t a1, std::uint64_t a2, std::uint64_t a3, std::uint64_t a4, std::uint64_t a5) {
++    if (functions[0] == nullptr) Aps5NativeMissing_nid_no_patch("sceAudioInAsyncOpen");
++    return Aps5NativeCall_nid_no_patch(functions[0], a0, a1, a2, a3, a4, a5, 0, 0);
++}
++
++extern "C" std::uint64_t sceAudioInClose(std::uint64_t a0) {
++    if (functions[1] == nullptr) Aps5NativeMissing_nid_no_patch("sceAudioInClose");
++    return Aps5NativeCall_nid_no_patch(functions[1], a0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceAudioInGetSilentState(std::uint64_t a0) {
++    if (functions[2] == nullptr) Aps5NativeMissing_nid_no_patch("sceAudioInGetSilentState");
++    return Aps5NativeCall_nid_no_patch(functions[2], a0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceAudioInHqOpen(std::uint64_t a0, std::uint64_t a1, std::uint64_t a2, std::uint64_t a3, std::uint64_t a4, std::uint64_t a5) {
++    if (functions[3] == nullptr) Aps5NativeMissing_nid_no_patch("sceAudioInHqOpen");
++    return Aps5NativeCall_nid_no_patch(functions[3], a0, a1, a2, a3, a4, a5, 0, 0);
++}
++
++extern "C" std::uint64_t sceAudioInInit() {
++    if (functions[4] == nullptr) Aps5NativeMissing_nid_no_patch("sceAudioInInit");
++    return Aps5NativeCall_nid_no_patch(functions[4], 0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceAudioInInput(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[5] == nullptr) Aps5NativeMissing_nid_no_patch("sceAudioInInput");
++    return Aps5NativeCall_nid_no_patch(functions[5], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceAudioInOpen(std::uint64_t a0, std::uint64_t a1, std::uint64_t a2, std::uint64_t a3, std::uint64_t a4, std::uint64_t a5) {
++    if (functions[6] == nullptr) Aps5NativeMissing_nid_no_patch("sceAudioInOpen");
++    return Aps5NativeCall_nid_no_patch(functions[6], a0, a1, a2, a3, a4, a5, 0, 0);
++}
++
++extern "C" std::uint64_t sceAudioInUnknown_X4jdIS75P0() {
++    if (functions[7] == nullptr) Aps5NativeMissing_nid_no_patch("sceAudioInUnknown_X4jdIS75P0");
++    return Aps5NativeCall_nid_no_patch(functions[7], 0, 0, 0, 0, 0, 0, 0, 0);
++}
 diff --git a/core/libs/prx/aps5native/stubs/libSceCommonDialog.cpp b/core/libs/prx/aps5native/stubs/libSceCommonDialog.cpp
 new file mode 100644
 index 00000000..491e7d76
@@ -185,6 +266,99 @@ index 00000000..4420cc92
 +extern "C" std::uint64_t sceImeDialogTerm() {
 +    if (functions[7] == nullptr) Aps5NativeMissing_nid_no_patch("sceImeDialogTerm");
 +    return Aps5NativeCall_nid_no_patch(functions[7], 0, 0, 0, 0, 0, 0, 0, 0);
++}
+diff --git a/core/libs/prx/aps5native/stubs/libSceNetCtl.cpp b/core/libs/prx/aps5native/stubs/libSceNetCtl.cpp
+new file mode 100644
+index 00000000..553f569a
+--- /dev/null
++++ b/core/libs/prx/aps5native/stubs/libSceNetCtl.cpp
+@@ -0,0 +1,87 @@
++// РЎРіРµРЅРµСЂРёСЂРѕРІР°РЅРѕ tools/gen_native_stubs.py: x86-Р·Р°РіР»СѓС€РєР° libSceNetCtl.prx, РїРµСЂРµР°РґСЂРµСЃСѓСЋС‰Р°СЏ РІС‹Р·РѕРІС‹
++// РІ РЅР°С‚РёРІРЅСѓСЋ (aarch64) СЃР±РѕСЂРєСѓ С‡РµСЂРµР· РјРѕСЃС‚ box64. РќРµ РїСЂР°РІРёС‚СЊ РІСЂСѓС‡РЅСѓСЋ.
++#include "prx/aps5native/X86Host.hpp"
++
++#include <cstdint>
++#include <cstring>
++
++namespace {
++
++[[maybe_unused]] double floatBits(float value) {
++    // float РїРµСЂРµРґР°С‘С‚СЃСЏ РІ РјР»Р°РґС€РёС… 32 Р±РёС‚Р°С… d-СЂРµРіРёСЃС‚СЂР° (РЅР°С‚РёРІРЅР°СЏ СЃС‚РѕСЂРѕРЅР° С‡РёС‚Р°РµС‚ s-СЂРµРіРёСЃС‚СЂ).
++    std::uint64_t bits = 0;
++    std::memcpy(&bits, &value, sizeof(value));
++    double result;
++    std::memcpy(&result, &bits, sizeof(result));
++    return result;
++}
++
++const char* const names[] = {
++    "sceNetCtlCheckCallback",
++    "sceNetCtlGetInfo",
++    "sceNetCtlGetNatInfo",
++    "sceNetCtlGetResult",
++    "sceNetCtlGetState",
++    "sceNetCtlGetStateV6",
++    "sceNetCtlInit",
++    "sceNetCtlRegisterCallback",
++    "sceNetCtlTerm",
++    "sceNetCtlUnregisterCallback",
++};
++void* functions[10] = {};
++
++__attribute__((constructor)) void loadNative() {
++    Aps5NativeResolve_nid_no_patch("libSceNetCtl.prx", names, functions, 10);
++}
++
++} // namespace
++
++extern "C" std::uint64_t sceNetCtlCheckCallback() {
++    if (functions[0] == nullptr) Aps5NativeMissing_nid_no_patch("sceNetCtlCheckCallback");
++    return Aps5NativeCall_nid_no_patch(functions[0], 0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceNetCtlGetInfo(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[1] == nullptr) Aps5NativeMissing_nid_no_patch("sceNetCtlGetInfo");
++    return Aps5NativeCall_nid_no_patch(functions[1], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceNetCtlGetNatInfo(std::uint64_t a0) {
++    if (functions[2] == nullptr) Aps5NativeMissing_nid_no_patch("sceNetCtlGetNatInfo");
++    return Aps5NativeCall_nid_no_patch(functions[2], a0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceNetCtlGetResult(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[3] == nullptr) Aps5NativeMissing_nid_no_patch("sceNetCtlGetResult");
++    return Aps5NativeCall_nid_no_patch(functions[3], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceNetCtlGetState(std::uint64_t a0) {
++    if (functions[4] == nullptr) Aps5NativeMissing_nid_no_patch("sceNetCtlGetState");
++    return Aps5NativeCall_nid_no_patch(functions[4], a0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceNetCtlGetStateV6(std::uint64_t a0) {
++    if (functions[5] == nullptr) Aps5NativeMissing_nid_no_patch("sceNetCtlGetStateV6");
++    return Aps5NativeCall_nid_no_patch(functions[5], a0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceNetCtlInit() {
++    if (functions[6] == nullptr) Aps5NativeMissing_nid_no_patch("sceNetCtlInit");
++    return Aps5NativeCall_nid_no_patch(functions[6], 0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceNetCtlRegisterCallback(std::uint64_t a0, std::uint64_t a1, std::uint64_t a2) {
++    if (functions[7] == nullptr) Aps5NativeMissing_nid_no_patch("sceNetCtlRegisterCallback");
++    return Aps5NativeCall_nid_no_patch(functions[7], a0, a1, a2, 0, 0, 0, 0, 0);
++}
++
++extern "C" void sceNetCtlTerm() {
++    if (functions[8] == nullptr) Aps5NativeMissing_nid_no_patch("sceNetCtlTerm");
++    Aps5NativeCall_nid_no_patch(functions[8], 0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceNetCtlUnregisterCallback(std::uint64_t a0) {
++    if (functions[9] == nullptr) Aps5NativeMissing_nid_no_patch("sceNetCtlUnregisterCallback");
++    return Aps5NativeCall_nid_no_patch(functions[9], a0, 0, 0, 0, 0, 0, 0, 0);
 +}
 diff --git a/core/libs/prx/aps5native/stubs/libSceRandom.cpp b/core/libs/prx/aps5native/stubs/libSceRandom.cpp
 new file mode 100644
@@ -461,6 +635,300 @@ index 00000000..5626cf8f
 +extern "C" std::uint64_t sceRtcTickAddYears(std::uint64_t a0, std::uint64_t a1, std::uint64_t a2) {
 +    if (functions[33] == nullptr) Aps5NativeMissing_nid_no_patch("sceRtcTickAddYears");
 +    return Aps5NativeCall_nid_no_patch(functions[33], a0, a1, a2, 0, 0, 0, 0, 0);
++}
+diff --git a/core/libs/prx/aps5native/stubs/libSceSaveData.native.cpp b/core/libs/prx/aps5native/stubs/libSceSaveData.native.cpp
+new file mode 100644
+index 00000000..0507a6e5
+--- /dev/null
++++ b/core/libs/prx/aps5native/stubs/libSceSaveData.native.cpp
+@@ -0,0 +1,195 @@
++// РЎРіРµРЅРµСЂРёСЂРѕРІР°РЅРѕ tools/gen_native_stubs.py: x86-Р·Р°РіР»СѓС€РєР° libSceSaveData.native.prx, РїРµСЂРµР°РґСЂРµСЃСѓСЋС‰Р°СЏ РІС‹Р·РѕРІС‹
++// РІ РЅР°С‚РёРІРЅСѓСЋ (aarch64) СЃР±РѕСЂРєСѓ С‡РµСЂРµР· РјРѕСЃС‚ box64. РќРµ РїСЂР°РІРёС‚СЊ РІСЂСѓС‡РЅСѓСЋ.
++#include "prx/aps5native/X86Host.hpp"
++
++#include <cstdint>
++#include <cstring>
++
++namespace {
++
++[[maybe_unused]] double floatBits(float value) {
++    // float РїРµСЂРµРґР°С‘С‚СЃСЏ РІ РјР»Р°РґС€РёС… 32 Р±РёС‚Р°С… d-СЂРµРіРёСЃС‚СЂР° (РЅР°С‚РёРІРЅР°СЏ СЃС‚РѕСЂРѕРЅР° С‡РёС‚Р°РµС‚ s-СЂРµРіРёСЃС‚СЂ).
++    std::uint64_t bits = 0;
++    std::memcpy(&bits, &value, sizeof(value));
++    double result;
++    std::memcpy(&result, &bits, sizeof(result));
++    return result;
++}
++
++const char* const names[] = {
++    "sceSaveDataBackup",
++    "sceSaveDataCancel",
++    "sceSaveDataCommit",
++    "sceSaveDataConvert",
++    "sceSaveDataCreateTransactionResource",
++    "sceSaveDataDelete",
++    "sceSaveDataDeleteTransactionResource",
++    "sceSaveDataDirNameSearch",
++    "sceSaveDataDirNameSearchPs4",
++    "sceSaveDataGetConvertProgress",
++    "sceSaveDataGetEventResult",
++    "sceSaveDataGetMountInfo",
++    "sceSaveDataGetParam",
++    "sceSaveDataGetSaveDataMemory2",
++    "sceSaveDataInitialize3",
++    "sceSaveDataLoadIcon",
++    "sceSaveDataMount3",
++    "sceSaveDataPrepare",
++    "sceSaveDataSaveIcon",
++    "sceSaveDataSaveIconByPath",
++    "sceSaveDataSetParam",
++    "sceSaveDataSetSaveDataMemory2",
++    "sceSaveDataSetupSaveDataMemory2",
++    "sceSaveDataSyncSaveDataMemory",
++    "sceSaveDataTerminate",
++    "sceSaveDataTransferringMount",
++    "sceSaveDataTransferringMountPs4",
++    "sceSaveDataUmount2",
++};
++void* functions[28] = {};
++
++__attribute__((constructor)) void loadNative() {
++    Aps5NativeResolve_nid_no_patch("libSceSaveData.native.prx", names, functions, 28);
++}
++
++} // namespace
++
++extern "C" std::uint64_t sceSaveDataBackup(std::uint64_t a0) {
++    if (functions[0] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataBackup");
++    return Aps5NativeCall_nid_no_patch(functions[0], a0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataCancel() {
++    if (functions[1] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataCancel");
++    return Aps5NativeCall_nid_no_patch(functions[1], 0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataCommit(std::uint64_t a0) {
++    if (functions[2] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataCommit");
++    return Aps5NativeCall_nid_no_patch(functions[2], a0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataConvert() {
++    if (functions[3] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataConvert");
++    return Aps5NativeCall_nid_no_patch(functions[3], 0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataCreateTransactionResource(std::uint64_t a0) {
++    if (functions[4] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataCreateTransactionResource");
++    return Aps5NativeCall_nid_no_patch(functions[4], a0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataDelete(std::uint64_t a0) {
++    if (functions[5] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataDelete");
++    return Aps5NativeCall_nid_no_patch(functions[5], a0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataDeleteTransactionResource(std::uint64_t a0) {
++    if (functions[6] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataDeleteTransactionResource");
++    return Aps5NativeCall_nid_no_patch(functions[6], a0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataDirNameSearch(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[7] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataDirNameSearch");
++    return Aps5NativeCall_nid_no_patch(functions[7], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataDirNameSearchPs4(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[8] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataDirNameSearchPs4");
++    return Aps5NativeCall_nid_no_patch(functions[8], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataGetConvertProgress() {
++    if (functions[9] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataGetConvertProgress");
++    return Aps5NativeCall_nid_no_patch(functions[9], 0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataGetEventResult(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[10] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataGetEventResult");
++    return Aps5NativeCall_nid_no_patch(functions[10], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataGetMountInfo(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[11] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataGetMountInfo");
++    return Aps5NativeCall_nid_no_patch(functions[11], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataGetParam(std::uint64_t a0, std::uint64_t a1, std::uint64_t a2, std::uint64_t a3, std::uint64_t a4) {
++    if (functions[12] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataGetParam");
++    return Aps5NativeCall_nid_no_patch(functions[12], a0, a1, a2, a3, a4, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataGetSaveDataMemory2(std::uint64_t a0) {
++    if (functions[13] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataGetSaveDataMemory2");
++    return Aps5NativeCall_nid_no_patch(functions[13], a0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataInitialize3(std::uint64_t a0) {
++    if (functions[14] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataInitialize3");
++    return Aps5NativeCall_nid_no_patch(functions[14], a0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataLoadIcon(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[15] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataLoadIcon");
++    return Aps5NativeCall_nid_no_patch(functions[15], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataMount3(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[16] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataMount3");
++    return Aps5NativeCall_nid_no_patch(functions[16], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataPrepare(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[17] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataPrepare");
++    return Aps5NativeCall_nid_no_patch(functions[17], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataSaveIcon(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[18] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataSaveIcon");
++    return Aps5NativeCall_nid_no_patch(functions[18], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataSaveIconByPath(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[19] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataSaveIconByPath");
++    return Aps5NativeCall_nid_no_patch(functions[19], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataSetParam(std::uint64_t a0, std::uint64_t a1, std::uint64_t a2, std::uint64_t a3) {
++    if (functions[20] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataSetParam");
++    return Aps5NativeCall_nid_no_patch(functions[20], a0, a1, a2, a3, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataSetSaveDataMemory2(std::uint64_t a0) {
++    if (functions[21] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataSetSaveDataMemory2");
++    return Aps5NativeCall_nid_no_patch(functions[21], a0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataSetupSaveDataMemory2(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[22] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataSetupSaveDataMemory2");
++    return Aps5NativeCall_nid_no_patch(functions[22], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataSyncSaveDataMemory(std::uint64_t a0) {
++    if (functions[23] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataSyncSaveDataMemory");
++    return Aps5NativeCall_nid_no_patch(functions[23], a0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataTerminate() {
++    if (functions[24] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataTerminate");
++    return Aps5NativeCall_nid_no_patch(functions[24], 0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataTransferringMount(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[25] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataTransferringMount");
++    return Aps5NativeCall_nid_no_patch(functions[25], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataTransferringMountPs4(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[26] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataTransferringMountPs4");
++    return Aps5NativeCall_nid_no_patch(functions[26], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataUmount2(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[27] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataUmount2");
++    return Aps5NativeCall_nid_no_patch(functions[27], a0, a1, 0, 0, 0, 0, 0, 0);
++}
+diff --git a/core/libs/prx/aps5native/stubs/libSceSaveDataDialog.native.cpp b/core/libs/prx/aps5native/stubs/libSceSaveDataDialog.native.cpp
+new file mode 100644
+index 00000000..eae0e4ba
+--- /dev/null
++++ b/core/libs/prx/aps5native/stubs/libSceSaveDataDialog.native.cpp
+@@ -0,0 +1,87 @@
++// РЎРіРµРЅРµСЂРёСЂРѕРІР°РЅРѕ tools/gen_native_stubs.py: x86-Р·Р°РіР»СѓС€РєР° libSceSaveDataDialog.native.prx, РїРµСЂРµР°РґСЂРµСЃСѓСЋС‰Р°СЏ РІС‹Р·РѕРІС‹
++// РІ РЅР°С‚РёРІРЅСѓСЋ (aarch64) СЃР±РѕСЂРєСѓ С‡РµСЂРµР· РјРѕСЃС‚ box64. РќРµ РїСЂР°РІРёС‚СЊ РІСЂСѓС‡РЅСѓСЋ.
++#include "prx/aps5native/X86Host.hpp"
++
++#include <cstdint>
++#include <cstring>
++
++namespace {
++
++[[maybe_unused]] double floatBits(float value) {
++    // float РїРµСЂРµРґР°С‘С‚СЃСЏ РІ РјР»Р°РґС€РёС… 32 Р±РёС‚Р°С… d-СЂРµРіРёСЃС‚СЂР° (РЅР°С‚РёРІРЅР°СЏ СЃС‚РѕСЂРѕРЅР° С‡РёС‚Р°РµС‚ s-СЂРµРіРёСЃС‚СЂ).
++    std::uint64_t bits = 0;
++    std::memcpy(&bits, &value, sizeof(value));
++    double result;
++    std::memcpy(&result, &bits, sizeof(result));
++    return result;
++}
++
++const char* const names[] = {
++    "sceSaveDataDialogClose",
++    "sceSaveDataDialogGetResult",
++    "sceSaveDataDialogGetStatus",
++    "sceSaveDataDialogInitialize",
++    "sceSaveDataDialogIsReadyToDisplay",
++    "sceSaveDataDialogOpen",
++    "sceSaveDataDialogProgressBarInc",
++    "sceSaveDataDialogProgressBarSetValue",
++    "sceSaveDataDialogTerminate",
++    "sceSaveDataDialogUpdateStatus",
++};
++void* functions[10] = {};
++
++__attribute__((constructor)) void loadNative() {
++    Aps5NativeResolve_nid_no_patch("libSceSaveDataDialog.native.prx", names, functions, 10);
++}
++
++} // namespace
++
++extern "C" std::uint64_t sceSaveDataDialogClose(std::uint64_t a0) {
++    if (functions[0] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataDialogClose");
++    return Aps5NativeCall_nid_no_patch(functions[0], a0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataDialogGetResult(std::uint64_t a0) {
++    if (functions[1] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataDialogGetResult");
++    return Aps5NativeCall_nid_no_patch(functions[1], a0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataDialogGetStatus() {
++    if (functions[2] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataDialogGetStatus");
++    return Aps5NativeCall_nid_no_patch(functions[2], 0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataDialogInitialize() {
++    if (functions[3] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataDialogInitialize");
++    return Aps5NativeCall_nid_no_patch(functions[3], 0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataDialogIsReadyToDisplay() {
++    if (functions[4] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataDialogIsReadyToDisplay");
++    return Aps5NativeCall_nid_no_patch(functions[4], 0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataDialogOpen(std::uint64_t a0) {
++    if (functions[5] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataDialogOpen");
++    return Aps5NativeCall_nid_no_patch(functions[5], a0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataDialogProgressBarInc(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[6] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataDialogProgressBarInc");
++    return Aps5NativeCall_nid_no_patch(functions[6], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataDialogProgressBarSetValue(std::uint64_t a0, std::uint64_t a1) {
++    if (functions[7] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataDialogProgressBarSetValue");
++    return Aps5NativeCall_nid_no_patch(functions[7], a0, a1, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataDialogTerminate() {
++    if (functions[8] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataDialogTerminate");
++    return Aps5NativeCall_nid_no_patch(functions[8], 0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++extern "C" std::uint64_t sceSaveDataDialogUpdateStatus() {
++    if (functions[9] == nullptr) Aps5NativeMissing_nid_no_patch("sceSaveDataDialogUpdateStatus");
++    return Aps5NativeCall_nid_no_patch(functions[9], 0, 0, 0, 0, 0, 0, 0, 0);
 +}
 diff --git a/core/libs/prx/aps5native/stubs/libSceSystemService.cpp b/core/libs/prx/aps5native/stubs/libSceSystemService.cpp
 new file mode 100644
@@ -982,10 +1450,10 @@ index 7c69636b..e4cc3281 100644
      return 0;
  }
 diff --git a/tools/gen_native_stubs.py b/tools/gen_native_stubs.py
-index 07b867cc..e642af29 100644
+index 07b867cc..c6fd5370 100644
 --- a/tools/gen_native_stubs.py
 +++ b/tools/gen_native_stubs.py
-@@ -27,6 +27,13 @@ GROUP = {
+@@ -27,6 +27,17 @@ GROUP = {
      "libSceMouse": ["libSceMouse"],
      "libSceKeyboard": ["libSceKeyboard"],
      "libSceAudioOut": ["libSceAudioOut"],
@@ -996,10 +1464,14 @@ index 07b867cc..e642af29 100644
 +    "libSceImeDialog": ["libSceImeDialog"],
 +    "libSceRandom": ["libSceRandom"],
 +    "libSceWebBrowserDialog": ["libSceWebBrowserDialog"],
++    "libSceNetCtl": ["libSceNetCtl"],
++    "libSceAudioIn": ["libSceAudioIn"],
++    "libSceSaveData.native": ["libSceSaveData.native"],
++    "libSceSaveDataDialog.native": ["libSceSaveDataDialog.native"],
  }
  
  # Р’РЅСѓС‚СЂРµРЅРЅРѕСЃС‚Рё СЃС‚Р°С‚РёС‡РµСЃРєРѕРіРѕ SDL Рё РїСЂРѕС‡РёРµ РЅРµ-API СЌРєСЃРїРѕСЂС‚С‹.
-@@ -44,14 +51,22 @@ FLOAT_WORDS = {"float"}
+@@ -44,14 +55,22 @@ FLOAT_WORDS = {"float"}
  DOUBLE_WORDS = {"double"}
  
  
@@ -1030,7 +1502,7 @@ index 07b867cc..e642af29 100644
  
  
  def read_sources(root):
-@@ -287,7 +302,7 @@ def main():
+@@ -287,7 +306,7 @@ def main():
      typedefs = collect_typedefs(all_texts)
      status = 0
      for library in GROUP:

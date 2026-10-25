@@ -34,6 +34,10 @@ GROUP = {
     "libSceImeDialog": ["libSceImeDialog"],
     "libSceRandom": ["libSceRandom"],
     "libSceWebBrowserDialog": ["libSceWebBrowserDialog"],
+    "libSceNetCtl": ["libSceNetCtl"],
+    "libSceAudioIn": ["libSceAudioIn"],
+    "libSceSaveData.native": ["libSceSaveData.native"],
+    "libSceSaveDataDialog.native": ["libSceSaveDataDialog.native"],
 }
 
 # Внутренности статического SDL и прочие не-API экспорты.
