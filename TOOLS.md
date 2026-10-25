@@ -46,6 +46,7 @@ su -c 'am force-stop org.anyps5.android'
 | `sdlgpu/spvif.py`, `cmpall.sh`, `desc.py` | сравнение интерфейсов SPIR-V, разбор `.desc` (раскладка uniform) |
 | `mew1080.sh` | патч app.elf: 1080p вместо 4K (`undo` — откат) |
 | `mew-native.sh` | патч app.elf: нативные lzcnt в TLSF-аллокаторе (`undo`) |
+| `mew-atlas.sh` | патч app.elf: фиксация атласа SWF 4096 (защита от вылета роликов глав, `undo`) |
 | `sesscap.sh` | пассивный сборщик сессий (root, стартует из `/data/adb/service.d/sesscap-start.sh`): FPS, потоки, simpleperf, снимки экрана раз в минуту → `/data/local/tmp/sesscap/S<дата>/` |
 | `jitmap.py` | карта блоков box64 dynarec живого процесса |
 | `psdis.sh` | дизассемблер PSSL-шейдера (RDNA2 через `llvm-mc`) |

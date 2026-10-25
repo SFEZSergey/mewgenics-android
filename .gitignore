@@ -4,3 +4,11 @@ build*/
 *.apk
 adapters.inc
 __pycache__/
+PPSA37318*
+PPSA37318/
+*.elf
+*.raw
+*.pswf
+*.box64
+/sesscap*
+sesscap.txt
