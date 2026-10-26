@@ -35,15 +35,19 @@ index 8bcb0c4..428d5c2 100644
      head = 0;
      count = 0;
      return MOUSE_OK;
-@@ -143,7 +147,7 @@ int ReadAbsolute(std::int32_t handle, MouseAbsoluteData* data, std::int32_t num)
+@@ -143,8 +147,8 @@ int ReadAbsolute(std::int32_t handle, MouseAbsoluteData* data, std::int32_t num)
      MouseAbsoluteData sample{};
      sample.timestamp = sceKernelGetProcessTime();
-     sample.connected = connected ? 1u : 0u;
+-    sample.connected = connected ? 1u : 0u;
 -    sample.buttons = connected ? buttons : 0u;
-+    sample.buttons = connected ? (buttons | std::exchange(pressedSinceRead, 0u)) : 0u;
-     sample.x = static_cast<std::uint16_t>(absoluteX);
-     sample.y = static_cast<std::uint16_t>(absoluteY);
+-    sample.x = static_cast<std::uint16_t>(absoluteX);
+-    sample.y = static_cast<std::uint16_t>(absoluteY);
++    sample.connected = 1u;
++    sample.buttons = buttons | std::exchange(pressedSinceRead, 0u);
++    sample.x = static_cast<std::uint16_t>(static_cast<std::int16_t>(std::clamp(std::round(absoluteX), -32768.0, 32767.0)));
++    sample.y = static_cast<std::uint16_t>(static_cast<std::int16_t>(std::clamp(std::round(absoluteY), -32768.0, 32767.0)));
      sample.wheel = std::exchange(absoluteWheel, 0);
+     sample.tilt = std::exchange(absoluteTilt, 0);
 @@ -157,7 +161,7 @@ void Publish(const MouseInputEvent& event) {
      if (event.connectionChange) {
          if (connected == event.connected) return;
@@ -68,22 +72,28 @@ index 8bcb0c4..428d5c2 100644
          else buttons &= ~event.button;
      }
      MouseData data{};
-@@ -183,4 +190,38 @@ void Publish(const MouseInputEvent& event) {
+@@ -183,4 +190,44 @@ void Publish(const MouseInputEvent& event) {
      enqueue(data);
  }
  
-+void PublishDirect(std::int32_t targetX, std::int32_t targetY, std::uint32_t button, bool pressed) {
++void PublishDirect(std::int32_t targetX, std::int32_t targetY, std::uint32_t button, bool pressed, std::uintptr_t delta) {
 +    std::lock_guard lock(mouseMutex);
-+    if (!opened) return;
++    connected = true;
 +
 +    targetX = std::clamp(targetX, 0, 1920);
 +    targetY = std::clamp(targetY, 0, 1080);
 +
-+    typedef uintptr_t (*delta_fn)(void);
-+    static delta_fn get_delta = nullptr;
-+    if (!get_delta) get_delta = (delta_fn)dlsym(RTLD_DEFAULT, "Aps5GetAppElfDelta");
++    if (delta == 0) {
++        typedef uintptr_t (*delta_fn)(void);
++        static delta_fn get_delta = nullptr;
++        if (!get_delta) {
++            void* box = dlopen("libbox64.so", RTLD_NOW | RTLD_NOLOAD);
++            if (box) get_delta = (delta_fn)dlsym(box, "Aps5GetAppElfDelta");
++            if (!get_delta) get_delta = (delta_fn)dlsym(RTLD_DEFAULT, "Aps5GetAppElfDelta");
++        }
++        if (get_delta) delta = get_delta();
++    }
 +
-+    const uintptr_t delta = get_delta ? get_delta() : 0;
 +    if (delta != 0) {
 +        const int32_t curX = *(const int32_t*)(delta + 0x1ab21c0);
 +        const int32_t curY = *(const int32_t*)(delta + 0x1ab21c4);

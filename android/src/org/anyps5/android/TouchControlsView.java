@@ -471,8 +471,10 @@ public final class TouchControlsView extends View {
 
     private static void direct(int gx, int gy, int button, boolean pressed) {
         try {
+            android.util.Log.i("TouchControlsView", "direct: (" + gx + ", " + gy + ") btn=" + button + " pressed=" + pressed);
             GameActivity.nativeTouchDirect(gx, gy, button, pressed);
-        } catch (UnsatisfiedLinkError ignored) {
+        } catch (Throwable t) {
+            android.util.Log.e("TouchControlsView", "direct error: " + t.getMessage());
         }
     }
 

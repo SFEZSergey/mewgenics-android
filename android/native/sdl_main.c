@@ -81,24 +81,33 @@ JNIEXPORT void JNICALL Java_org_anyps5_android_GameActivity_nativeTouchMouse(JNI
     publish(&event);
 }
 
-typedef void (*mouse_publish_direct_fn)(int32_t, int32_t, uint32_t, bool);
+typedef void (*mouse_publish_direct_fn)(int32_t, int32_t, uint32_t, bool, uintptr_t);
 
 static mouse_publish_direct_fn mouse_publish_direct(void) {
     static mouse_publish_direct_fn publish_direct;
-    if (publish_direct == NULL && mouse_library[0] != '\0') {
-        void *library = dlopen(mouse_library, RTLD_NOW | RTLD_NOLOAD);
-        if (library != NULL) publish_direct = (mouse_publish_direct_fn)dlsym(library, "MousePublishDirect_nid_postfix");
-        if (library != NULL && publish_direct == NULL) publish_direct = (mouse_publish_direct_fn)dlsym(library, "MousePublishDirect");
+    if (publish_direct == NULL) {
+        void *library = NULL;
+        if (mouse_library[0] != '\0') library = dlopen(mouse_library, RTLD_NOW | RTLD_NOLOAD);
+        if (library == NULL) library = dlopen("libSceMouse.so", RTLD_NOW | RTLD_NOLOAD);
+        if (library != NULL) {
+            publish_direct = (mouse_publish_direct_fn)dlsym(library, "MousePublishDirect_nid_postfix");
+            if (publish_direct == NULL) publish_direct = (mouse_publish_direct_fn)dlsym(library, "MousePublishDirect");
+        }
+        if (publish_direct == NULL) publish_direct = (mouse_publish_direct_fn)dlsym(RTLD_DEFAULT, "MousePublishDirect_nid_postfix");
+        if (publish_direct == NULL) publish_direct = (mouse_publish_direct_fn)dlsym(RTLD_DEFAULT, "MousePublishDirect");
     }
     return publish_direct;
 }
 
+extern uintptr_t Aps5GetAppElfDelta(void) __attribute__((weak));
+
 JNIEXPORT void JNICALL Java_org_anyps5_android_GameActivity_nativeTouchDirect(JNIEnv *env, jclass cls, jint x, jint y, jint button, jboolean pressed) {
     (void)env;
     (void)cls;
+    const uintptr_t delta = Aps5GetAppElfDelta ? Aps5GetAppElfDelta() : 0;
     const mouse_publish_direct_fn pub_direct = mouse_publish_direct();
     if (pub_direct != NULL) {
-        pub_direct(x, y, (uint32_t)button, pressed);
+        pub_direct(x, y, (uint32_t)button, pressed, delta);
         return;
     }
     const mouse_publish_fn publish = mouse_publish();
