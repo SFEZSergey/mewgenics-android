@@ -1035,12 +1035,6 @@ public final class MainActivity extends Activity {
             applyGameLanguage();
             startActivity(new Intent(MainActivity.this, GameActivity.class));
         }});
-            } catch (final Throwable e) {
-                runOnUiThread(new Runnable() { @Override public void run() {
-                    status.setText(t("Импорт не удался:\n", "Import failed:\n") + e.getMessage()); start.setEnabled(true);
-                }});
-            }
-        }}).start();
     }
 
 
