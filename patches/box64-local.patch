@@ -449,7 +449,7 @@ index 57fb4cc..4c05246 100644
  
  static void Aps5SinCos(double x, double* sn, double* cs)
  {
-@@ -41,6 +49,79 @@ static void* Aps5MemSet(void* dst, int value, size_t size)
+@@ -41,6 +49,132 @@ static void* Aps5MemSet(void* dst, int value, size_t size)
      return memset(dst, value, size);
  }
  
@@ -526,10 +526,63 @@ index 57fb4cc..4c05246 100644
 +    emu->xmm[0].f[0] = fn((void*)R_RDI, (void*)R_RSI, emu->xmm[0].f[0]);
 +}
 +
++static void* Aps5AgcSetViewport(void* dst, int32_t w, int32_t h, int32_t x, int32_t y, float min_d, float max_d)
++{
++    uint32_t* p = (uint32_t*)dst;
++    p[0]  = 0x10000000;
++    *(float*)(p + 1)  = (float)w * 0.5f;
++    p[2]  = 0x10000000;
++    *(float*)(p + 3)  = (float)h * -0.5f;
++    p[4]  = 0x10000000;
++    p[5]  = 0x3f800000;
++    p[6]  = 0x10000000;
++    *(float*)(p + 7)  = (float)w * 0.5f + (float)x;
++    p[8]  = 0x10000000;
++    *(float*)(p + 9)  = (float)h * 0.5f + (float)y;
++    p[10] = 0x10000000;
++    p[11] = 0;
++    p[12] = 0x10000000;
++    p[13] = (((uint32_t)y << 16) & 0x7fff0000u) | ((uint32_t)x & 0x7fffu);
++    p[14] = 0x10000000;
++    p[15] = ((((uint32_t)(y + h)) << 16) & 0x7fff0000u) | ((uint32_t)(x + w) & 0x7fffu);
++    p[16] = 0x10000000;
++    *(float*)(p + 17) = min_d;
++    p[18] = 0x10000000;
++    *(float*)(p + 19) = max_d;
++    return dst;
++}
++
++static void Aps5Wrap_SetViewport(x64emu_t* emu, uintptr_t fcn)
++{
++    void* (*fn)(void*, int32_t, int32_t, int32_t, int32_t, float, float) = (void*)fcn;
++    R_RAX = (uintptr_t)fn((void*)R_RDI, (int32_t)R_RSI, (int32_t)R_RDX, (int32_t)R_RCX, (int32_t)R_R8,
++                          emu->xmm[0].f[0], emu->xmm[1].f[0]);
++}
++
++static uint64_t Aps5AgcInitTexture(uint64_t dst, uint64_t rsi, uint64_t edx, uint64_t ecx)
++{
++    uint32_t* p = (uint32_t*)dst;
++    p[0] = (uint32_t)rsi;
++    p[1] = (((uint32_t)edx << 16) & 0x3fff0000u) | ((uint16_t)(rsi >> 32));
++    p[2] = (uint32_t)ecx;
++    p[3] = edx ? 0x5204 : 0x30005204;
++    return 0;
++}
++
++static uint64_t Aps5TableLookup(uint64_t table, uint64_t idx1, uint64_t idx2)
++{
++    const uint8_t* p = (const uint8_t*)table;
++    uint16_t limit = *(const uint16_t*)(p + 0x2e + (uint32_t)idx1 * 2);
++    if ((uint32_t)idx2 >= limit)
++        return 0x7fff;
++    const uint16_t* sub = *(const uint16_t* const*)(p + 8 + (uint32_t)idx1 * 8);
++    return sub[(uint32_t)idx2] & 0x7fff;
++}
++
  typedef struct aps5hot_s {
      const char* module;     // file name of the loaded module
      uintptr_t   offset;     // function address in the module
-@@ -57,8 +138,85 @@ static const aps5hot_t hot[] = {
+@@ -57,8 +191,88 @@ static const aps5hot_t hot[] = {
      {"libc.prx.guest.prx", 0x10430, 383, 0x9bbe0fbf4c4671e6ull, pFpiL, Aps5MemSet, "memset"},
      {"libc.prx.guest.prx", 0x4e2f0, 1213, 0xb530e8a466540be7ull, vFdpp, Aps5SinCos, "sincos"},
      {"libc.prx.guest.prx", 0x7f150, 62, 0xaae49931ef1d8a5full, iFppi, Aps5CompareExchange4, "cas4"},
@@ -551,6 +604,9 @@ index 57fb4cc..4c05246 100644
 +    {"app.elf", 0x128e340, 759, 0x85b4be58126303f6ull, Aps5Wrap_fFppf, FaReverbProcessChannel, "faudio-reverb-channel"},
 +    {"app.elf", 0x12968c0, 350, 0x5e996309377c029dull, vFuuuppp, FaMix2in2out, "faudio-mix-2in-2out"},
 +    {"app.elf", 0x12957f0, 586, 0x819fa00e1b494a13ull, vFpuf, FaAmplify, "faudio-amplify"},
++    {"app.elf", 0x13ac1b0, 219, 0xd70e2335954a9f12ull, Aps5Wrap_SetViewport, Aps5AgcSetViewport, "agc-set-viewport"},
++    {"app.elf", 0x1399e50, 52, 0x7a471e6518c16014ull, Aps5SdlGpuSlot6, Aps5AgcInitTexture, "agc-init-texture"},
++    {"app.elf", 0x13a46b0, 32, 0x66b9a1f18511f060ull, Aps5SdlGpuSlot6, Aps5TableLookup, "table-lookup"},
  };
  
 +// Mewgenics (PPSA37318) renders through SDL_GPU, whose only backend in app.elf is Agc. With
@@ -615,7 +671,7 @@ index 57fb4cc..4c05246 100644
  static uint64_t Fnv1a(const uint8_t* p, size_t size)
  {
      uint64_t h = 0xcbf29ce484222325ull;
-@@ -117,6 +275,28 @@ int Aps5HotPatchModule(const char* path, uintptr_t delta)
+@@ -117,6 +331,28 @@ int Aps5HotPatchModule(const char* path, uintptr_t delta)
              strcat(names, hot[i].name);
          }
      }
