@@ -28,7 +28,7 @@ cp "$ADRENO"/build/src/hook/lib{hook_impl,main_hook,file_redirect_hook,gsl_alloc
 cp "$BIONIC/core/libs/prx/aps5native/libaps5coreshim.so" "$LIB/"
 # Native Vulkan SDL_GPU backend for SDL_GPU titles (Mewgenics, APS5_SDLGPU_VULKAN=1; box64 aps5hot loads it).
 bash "${SDLGPU_DIR:-$HOME/ps5-android/pvz-replanted-android/android/native/sdlgpu}/build.sh" "$LIB/libaps5sdlgpu.so"
-GROUP="libSceAgcDriver libSceVideoOut libScePad libSceMouse libSceKeyboard libSceAudioOut libSceUserService libSceSystemService libSceRtc libSceCommonDialog libSceImeDialog libSceRandom libSceWebBrowserDialog libSceNetCtl libSceAudioIn libSceSaveData.native libSceSaveDataDialog.native"
+GROUP="libSceAgcDriver libSceVideoOut libScePad libSceMouse libSceKeyboard libSceAudioOut"
 for lib in $GROUP; do
   cp "$BIONIC/core/libs/libs/unpatched/$lib.prx" "$LIB/$lib.so"
   patchelf --set-soname "$lib.so" --replace-needed libSDL2.so.0 libSDL2.so "$LIB/$lib.so"
