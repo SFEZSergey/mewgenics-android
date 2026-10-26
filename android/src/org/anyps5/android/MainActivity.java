@@ -1078,7 +1078,10 @@ public final class MainActivity extends Activity {
     private static boolean isSelf(File f) throws Exception {
         if (!f.isFile() || f.length() < 4) return false;
         InputStream in = new java.io.FileInputStream(f);
-        try { return in.read()==0x54 && in.read()==0x14 && in.read()==0xf5 && in.read()==0xee; } finally { in.close(); }
+        try {
+            int b0 = in.read(), b1 = in.read(), b2 = in.read(), b3 = in.read();
+            return (b0==0x54 && b1==0x14 && b2==0xf5 && b3==0xee) || (b0==0x4f && b1==0x15 && b2==0x3d && b3==0x1d);
+        } finally { in.close(); }
     }
     // Потоково, без чтения SELF в память: модули игры (Il2cppUserAssemblies.prx ~100 МБ) не помещаются в кучу Java
     // (256 МБ) вместе с копией образа. Сегменты копируются с диска на диск, нули между ними — разреженный файл.
@@ -1096,9 +1099,10 @@ public final class MainActivity extends Activity {
                 return;
             }
             String magic = head.length >= 4 ? String.format(Locale.US, "%02X %02X %02X %02X", head[0], head[1], head[2], head[3]) : "?";
-            if (head.length >= 4 && (head[0]&0xff)==0x4f && (head[1]&0xff)==0x15 && (head[2]&0xff)==0x3d && (head[3]&0xff)==0x1d)
-                throw new Exception(source.getName() + ": это SELF игры для PS4 (" + magic + "), AnyPS5 запускает только игры для PS5");
-            if (head.length < 0x20 || (u64(head, 0) & 0xffffffffL) != 0xEEF51454L) throw new Exception(source.getName() + " не является ни PS5 SELF, ни ELF (первые байты " + magic + "): похоже, дамп зашифрован или повреждён");
+            long magicU32 = u64(head, 0) & 0xffffffffL;
+            if (head.length < 0x20 || (magicU32 != 0xEEF51454L && magicU32 != 0x1D3D154FL)) {
+                throw new Exception(source.getName() + " не является ни SELF, ни ELF (первые байты " + magic + "): похоже, дамп зашифрован или повреждён");
+            }
             int count=u16(head,0x18); long tableLong=0x20L+(long)count*0x20L;
             if (tableLong+64>length) throw new Exception("Повреждена таблица сегментов SELF");
             int table=(int)tableLong;
