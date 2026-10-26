@@ -449,7 +449,7 @@ index 57fb4cc..4c05246 100644
  
  static void Aps5SinCos(double x, double* sn, double* cs)
  {
-@@ -41,6 +49,132 @@ static void* Aps5MemSet(void* dst, int value, size_t size)
+@@ -41,6 +49,134 @@ static void* Aps5MemSet(void* dst, int value, size_t size)
      return memset(dst, value, size);
  }
  
@@ -579,10 +579,12 @@ index 57fb4cc..4c05246 100644
 +    return sub[(uint32_t)idx2] & 0x7fff;
 +}
 +
++void Aps5SdlGpuSlot6(x64emu_t* emu, uintptr_t fcn);
++
  typedef struct aps5hot_s {
      const char* module;     // file name of the loaded module
      uintptr_t   offset;     // function address in the module
-@@ -57,8 +191,88 @@ static const aps5hot_t hot[] = {
+@@ -57,8 +193,88 @@ static const aps5hot_t hot[] = {
      {"libc.prx.guest.prx", 0x10430, 383, 0x9bbe0fbf4c4671e6ull, pFpiL, Aps5MemSet, "memset"},
      {"libc.prx.guest.prx", 0x4e2f0, 1213, 0xb530e8a466540be7ull, vFdpp, Aps5SinCos, "sincos"},
      {"libc.prx.guest.prx", 0x7f150, 62, 0xaae49931ef1d8a5full, iFppi, Aps5CompareExchange4, "cas4"},
@@ -671,7 +673,7 @@ index 57fb4cc..4c05246 100644
  static uint64_t Fnv1a(const uint8_t* p, size_t size)
  {
      uint64_t h = 0xcbf29ce484222325ull;
-@@ -117,6 +331,28 @@ int Aps5HotPatchModule(const char* path, uintptr_t delta)
+@@ -117,6 +333,28 @@ int Aps5HotPatchModule(const char* path, uintptr_t delta)
              strcat(names, hot[i].name);
          }
      }
