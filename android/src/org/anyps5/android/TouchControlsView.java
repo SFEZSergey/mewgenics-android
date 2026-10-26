@@ -87,7 +87,8 @@ public final class TouchControlsView extends View {
     private float mouseX, mouseY, mouseStartX, mouseStartY, mouseRestX, mouseRestY;
     private long mouseDownTime;
     private boolean mouseMoved, mouseSecondFinger, mouseDragging;
-    private static final long MOUSE_TAP_MS = 250, MOUSE_HOLD_MS = 400;
+    private static final long MOUSE_TAP_MS = 250, DEFAULT_LONG_PRESS_MS = 1500L;
+    private final long longPressMs;
     private float opacity;
     private Control selected;
     private float dragDx, dragDy;
@@ -104,6 +105,7 @@ public final class TouchControlsView extends View {
         this.editing = editing;
         preferences = context.getSharedPreferences("touch_controls", Context.MODE_PRIVATE);
         touchMouse = preferences.getBoolean("direct_touch", preferences.getBoolean("mouse", true));
+        longPressMs = preferences.getLong("long_press_ms", DEFAULT_LONG_PRESS_MS);
         visible = editing || preferences.getBoolean("visible", false);
         controls = createControls();
         toggle = controls[0];
@@ -395,7 +397,6 @@ public final class TouchControlsView extends View {
         return Math.max(0, Math.min(1080, Math.round(gy)));
     }
 
-    private static final long LONG_PRESS_MS = 400;
     private final Runnable longPressRunnable = new Runnable() {
         @Override public void run() {
             if (mousePointer >= 0 && !mouseMoved && !mouseSecondFinger) {
@@ -434,7 +435,7 @@ public final class TouchControlsView extends View {
         mouseMoved = mouseSecondFinger = mouseDragging = false;
         final int gx = toGameX(mouseStartX), gy = toGameY(mouseStartY);
         direct(gx, gy, 1, true);
-        postDelayed(longPressRunnable, LONG_PRESS_MS);
+        postDelayed(longPressRunnable, longPressMs);
         return true;
     }
 
