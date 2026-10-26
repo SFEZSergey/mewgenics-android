@@ -69,12 +69,12 @@ fi
 
 # 4. Нативная группа AnyPS5 (bionic)
 echo "=== Нативная группа AnyPS5 (bionic) ==="
-APS5_TARGETS="aps5coreshim libSceAgcDriver libSceVideoOut libScePad libSceMouse libSceKeyboard libSceAudioOut"
+APS5_TARGETS="libSceAgcDriver libSceVideoOut libScePad libSceMouse libSceKeyboard libSceAudioOut aps5coreshim"
 cmake --build "$A/build-bionic" --target $APS5_TARGETS -j"$(nproc)" 2>&1 | tail -n 5
 [ "${PIPESTATUS[0]}" = 0 ] && ok "AnyPS5 собран" || { fail "сборка AnyPS5"; exit 1; }
 # x86-64 libc и libkernel (идут в APK из build-x64s через build.sh)
 if [ -d "$A/build-x64s" ]; then
-  ninja -C "$A/build-x64s" core/libs/libs/libc.prx core/libs/libs/libkernel.prx core/libs/libs/libSceAgc.prx $APS5_TARGETS 2>&1 | tail -n 5
+  ninja -C "$A/build-x64s" core/libs/libs/libc.prx core/libs/libs/libkernel.prx core/libs/libs/libSceAgcDriver.prx core/libs/libs/libSceAgc.prx 2>&1 | tail -n 5
   [ "${PIPESTATUS[0]}" = 0 ] && ok "x86 libc/libkernel собраны" || { fail "сборка x86 libc/libkernel"; exit 1; }
 fi
 
