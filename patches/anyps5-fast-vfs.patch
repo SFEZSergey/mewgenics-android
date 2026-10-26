@@ -11,7 +11,7 @@ index fd554d14..ab17e067 100644
 +        const auto direct = std::filesystem::path(host) / sub;
 +        std::error_code ec;
 +        if (std::filesystem::exists(direct, ec) || std::filesystem::exists(direct.parent_path(), ec)) {
-+            return direct.make_preferred();
++            return direct;
 +        }
 +        std::filesystem::path result = ResolveHostPath(host, sub);
          return result.make_preferred();
