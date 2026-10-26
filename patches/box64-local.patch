@@ -705,7 +705,7 @@ new file mode 100644
 index 0000000..4a9e286
 --- /dev/null
 +++ b/src/tools/aps5hot_faudio.h
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,185 @@
 +// SPDX-License-Identifier: Zlib
 +// FAudio's reverb channel (FNA-XNA/FAudio src/FAudioFX_reverb.c, DspReverb_INTERNAL_ProcessChannel
 +// and the inline helpers it uses), for titles that link FAudio statically (Mewgenics, through SDL3).
