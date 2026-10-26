@@ -4,8 +4,11 @@ build*/
 *.apk
 adapters.inc
 __pycache__/
-PPSA37318*
-PPSA37318/
+/update.bundle
+/run_build.sh
+/PPSA37318*
+/PPSA37318/
+!android/assets/**
 *.elf
 *.raw
 *.pswf

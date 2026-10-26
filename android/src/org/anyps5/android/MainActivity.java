@@ -56,7 +56,7 @@ public final class MainActivity extends Activity {
         final float dp = getResources().getDisplayMetrics().density;
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.HORIZONTAL); root.setGravity(Gravity.CENTER); root.setPadding((int)(24*dp), (int)(12*dp), (int)(24*dp), (int)(12*dp));
-        root.setBackground(new android.graphics.drawable.GradientDrawable(android.graphics.drawable.GradientDrawable.Orientation.TL_BR, new int[] {0xff1e4620, 0xff0f2a14}));
+        root.setBackground(new android.graphics.drawable.GradientDrawable(android.graphics.drawable.GradientDrawable.Orientation.TL_BR, new int[] {0xff1e1a29, 0xff100d18}));
         android.widget.ImageView icon = new android.widget.ImageView(this);
         android.graphics.Bitmap gameIcon = null;
         for (String path : new String[] {"sce_sys/icon0.png", "app0/sce_sys/icon0.png"}) {
@@ -67,17 +67,17 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams iconSize = new LinearLayout.LayoutParams((int)(112*dp), (int)(112*dp)); iconSize.rightMargin = (int)(24*dp);
         root.addView(icon, iconSize);
         LinearLayout panel = new LinearLayout(this); panel.setOrientation(LinearLayout.VERTICAL); panel.setGravity(Gravity.CENTER_VERTICAL);
-        TextView title = new TextView(this); String gameName = readTitleName(activeGame()); title.setText(gameName != null ? gameName : (activeId() != null ? activeId() : "AnyPS5")); title.setTextColor(0xfff1f8e9); title.setTextSize(28); title.setTypeface(android.graphics.Typeface.DEFAULT_BOLD); panel.addView(title);
-        TextView subtitle = new TextView(this); subtitle.setText((activeId() != null ? activeId() + " · " : "") + t("PS5 · AnyPS5 + box64 + Turnip", "PS5 · AnyPS5 + box64 + Turnip")); subtitle.setTextColor(0xffa5d6a7); subtitle.setTextSize(12); panel.addView(subtitle);
-        status = new TextView(this); status.setTextColor(0xffdcedc8); status.setTextSize(13); status.setPadding(0, (int)(8*dp), 0, (int)(8*dp)); panel.addView(status);
+        TextView title = new TextView(this); String gameName = readTitleName(activeGame()); title.setText(gameName != null ? gameName : (activeId() != null ? activeId() : "Mewgenics")); title.setTextColor(0xfff8f5ee); title.setTextSize(28); title.setTypeface(android.graphics.Typeface.DEFAULT_BOLD); panel.addView(title);
+        TextView subtitle = new TextView(this); subtitle.setText((activeId() != null ? activeId() + " · " : "") + t("PS5 · AnyPS5 + box64 + Turnip", "PS5 · AnyPS5 + box64 + Turnip")); subtitle.setTextColor(0xffc5b4d6); subtitle.setTextSize(12); panel.addView(subtitle);
+        status = new TextView(this); status.setTextColor(0xffe2d9ec); status.setTextSize(13); status.setPadding(0, (int)(8*dp), 0, (int)(8*dp)); panel.addView(status);
         LinearLayout actions = new LinearLayout(this); actions.setOrientation(LinearLayout.HORIZONTAL); actions.setGravity(Gravity.CENTER_VERTICAL);
-        start = new Button(this); start.setText(t("Играть", "Play")); styleButton(start, 0xff43a047, 18);
+        start = new Button(this); start.setText(t("Играть", "Play")); styleButton(start, 0xffd32f2f, 18);
         start.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { importAndStart(false); } });
         LinearLayout.LayoutParams startSize = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT); startSize.rightMargin = (int)(12*dp);
         actions.addView(start, startSize);
-        Button library = new Button(this); library.setText(t("🎮 Игры", "🎮 Games")); styleButton(library, 0xff2e5e32, 14);
+        Button library = new Button(this); library.setText(t("🎮 Игры", "🎮 Games")); styleButton(library, 0xff352b46, 14);
         library.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { showLibrary(); } }); actions.addView(library);
-        Button settings = new Button(this); settings.setText(t("⚙ Настройки", "⚙ Settings")); styleButton(settings, 0xff2e5e32, 14);
+        Button settings = new Button(this); settings.setText(t("⚙ Настройки", "⚙ Settings")); styleButton(settings, 0xff352b46, 14);
         settings.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { showSettings(true); } });
         LinearLayout.LayoutParams settingsSize = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT); settingsSize.leftMargin = (int)(12*dp);
         actions.addView(settings, settingsSize);
@@ -140,7 +140,7 @@ public final class MainActivity extends Activity {
         android.graphics.drawable.BitmapDrawable image = new android.graphics.drawable.BitmapDrawable(getResources(), blurred);
         image.setFilterBitmap(true);
         // Затемнение, чтобы текст читался.
-        android.graphics.drawable.GradientDrawable shade = new android.graphics.drawable.GradientDrawable(android.graphics.drawable.GradientDrawable.Orientation.LEFT_RIGHT, new int[] {0xb0081a0b, 0x80081a0b, 0xb0081a0b});
+        android.graphics.drawable.GradientDrawable shade = new android.graphics.drawable.GradientDrawable(android.graphics.drawable.GradientDrawable.Orientation.LEFT_RIGHT, new int[] {0xcc14101e, 0x9014101e, 0xcc14101e});
         return new android.graphics.drawable.LayerDrawable(new android.graphics.drawable.Drawable[] {image, shade});
     }
 
@@ -158,7 +158,7 @@ public final class MainActivity extends Activity {
                 if (source != null) break;
             }
             if (source == null) {
-                final int id = getResources().getIdentifier("pvz_icon", "drawable", getPackageName());
+                final int id = getResources().getIdentifier("mewgenics_icon", "drawable", getPackageName());
                 if (id != 0) source = android.graphics.BitmapFactory.decodeResource(getResources(), id);
             }
             if (source == null) return null;
@@ -235,15 +235,15 @@ public final class MainActivity extends Activity {
     private View buildSettings() {
         final float dp = getResources().getDisplayMetrics().density;
         android.widget.ScrollView scroll = new android.widget.ScrollView(this);
-        scroll.setBackground(new android.graphics.drawable.GradientDrawable(android.graphics.drawable.GradientDrawable.Orientation.TL_BR, new int[] {0xff1e4620, 0xff0f2a14}));
+        scroll.setBackground(new android.graphics.drawable.GradientDrawable(android.graphics.drawable.GradientDrawable.Orientation.TL_BR, new int[] {0xff1e1a29, 0xff100d18}));
         LinearLayout list = new LinearLayout(this); list.setOrientation(LinearLayout.VERTICAL);
         list.setPadding((int)(32*dp), (int)(12*dp), (int)(32*dp), (int)(24*dp));
         scroll.addView(list);
         LinearLayout header = new LinearLayout(this); header.setGravity(Gravity.CENTER_VERTICAL);
-        Button back = new Button(this); back.setText("←"); styleButton(back, 0xff2e5e32, 18);
+        Button back = new Button(this); back.setText("←"); styleButton(back, 0xff352b46, 18);
         back.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { showSettings(false); } });
         header.addView(back);
-        TextView title = new TextView(this); title.setText(t("Настройки", "Settings")); title.setTextColor(0xfff1f8e9); title.setTextSize(24); title.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        TextView title = new TextView(this); title.setText(t("Настройки", "Settings")); title.setTextColor(0xfff8f5ee); title.setTextSize(24); title.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
         title.setPadding((int)(16*dp), 0, 0, 0);
         header.addView(title);
         list.addView(header);
@@ -324,12 +324,12 @@ public final class MainActivity extends Activity {
         row(list, t("Логи для отчёта об ошибке (zip)", "Logs for a bug report (zip)"), logs);
         Button report = new Button(this); report.setText("GitHub");
         report.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
-            try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/SFEZSergey/ReplantedAndroid/issues"))); } catch (Exception e) { notice(e.toString()); }
+            try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/SFEZSergey/mewgenics-android/issues"))); } catch (Exception e) { notice(e.toString()); }
         }});
         row(list, t("Сообщить об ошибке", "Report a problem"), report);
         String version = "";
         try { version = getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (Exception ignored) {}
-        TextView about = new TextView(this); about.setText("PvZ: Replanted " + version + " · AnyPS5 + box64 + Turnip"); about.setTextColor(0xff81a784); about.setTextSize(12);
+        TextView about = new TextView(this); about.setText("Mewgenics " + version + " · AnyPS5 + box64 + Turnip"); about.setTextColor(0xffa494b8); about.setTextSize(12);
         about.setPadding(0, (int)(16*dp), 0, 0);
         list.addView(about);
         return scroll;
@@ -337,7 +337,7 @@ public final class MainActivity extends Activity {
 
     private void section(LinearLayout list, String name) {
         final float dp = getResources().getDisplayMetrics().density;
-        TextView label = new TextView(this); label.setText(name); label.setTextColor(0xffa5d6a7); label.setTextSize(14); label.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        TextView label = new TextView(this); label.setText(name); label.setTextColor(0xffc5b4d6); label.setTextSize(14); label.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
         label.setPadding(0, (int)(18*dp), 0, (int)(4*dp));
         list.addView(label);
     }
@@ -345,10 +345,10 @@ public final class MainActivity extends Activity {
     private void row(LinearLayout list, String name, View control) {
         final float dp = getResources().getDisplayMetrics().density;
         LinearLayout line = new LinearLayout(this); line.setGravity(Gravity.CENTER_VERTICAL); line.setPadding(0, (int)(4*dp), 0, (int)(4*dp));
-        TextView label = new TextView(this); label.setText(name); label.setTextColor(0xffdcedc8); label.setTextSize(15);
+        TextView label = new TextView(this); label.setText(name); label.setTextColor(0xffe2d9ec); label.setTextSize(15);
         line.addView(label, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         if (control instanceof CheckBox) ((CheckBox) control).setPadding(0, 0, 0, 0);
-        else if (control instanceof Button) styleButton((Button) control, 0xff2e5e32, 14);
+        else if (control instanceof Button) styleButton((Button) control, 0xff352b46, 14);
         line.addView(control);
         list.addView(line);
     }
@@ -611,7 +611,7 @@ public final class MainActivity extends Activity {
     }
 
     private CheckBox option(String label, boolean checked) {
-        CheckBox box = new CheckBox(this); box.setText(label); box.setTextColor(0xffc5d5df); box.setTextSize(13); box.setChecked(checked);
+        CheckBox box = new CheckBox(this); box.setText(label); box.setTextColor(0xffe2d9ec); box.setTextSize(13); box.setChecked(checked);
         box.setPadding(0, 0, (int)(16 * getResources().getDisplayMetrics().density), 0);
         return box;
     }
@@ -644,6 +644,7 @@ public final class MainActivity extends Activity {
         try { if (current.equals(new String(Files.readAllBytes(stamp.toPath())).trim())) return; } catch (Exception ignored) {}
         copyPackagedRuntime("runtime/prx", new File(game, "libs"));
         copyPackagedRuntime("runtime/x64lib", new File(game, "x64lib"));
+        postRelinkGame(game);
         // box64's translation cache (DynaCache) is keyed by each library's version: after an update the
         // old files are never used again, so they go (the cache refills while playing).
         File[] cached = new File(getFilesDir(), ".cache/box64").listFiles();
@@ -830,7 +831,7 @@ public final class MainActivity extends Activity {
         Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
         i.addCategory(Intent.CATEGORY_OPENABLE);
         i.setType("application/zip");
-        i.putExtra(Intent.EXTRA_TITLE, "pvz-logs-" + new java.text.SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new java.util.Date()) + ".zip");
+        i.putExtra(Intent.EXTRA_TITLE, "mewgenics-logs-" + new java.text.SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new java.util.Date()) + ".zip");
         startActivityForResult(i, SAVE_LOGS);
     }
 
@@ -910,6 +911,7 @@ public final class MainActivity extends Activity {
             new Thread(new Runnable() { @Override public void run() {
                 try {
                     refreshRuntimeIfUpdated(game);
+                    postRelinkGame(game);
                     runOnUiThread(new Runnable() { @Override public void run() {
                         start.setEnabled(true); showStatus();
                         applyGameLanguage();
@@ -972,6 +974,7 @@ public final class MainActivity extends Activity {
                 copyPackagedRuntime("runtime/prx", new File(game, "libs"));
                 linkGuestPrxLibraries(game);
                 copyPackagedRuntime("runtime/x64lib", new File(game, "x64lib"));
+                postRelinkGame(game);
                 Files.write(new File(game, ".runtime-stamp").toPath(), Long.toString(getPackageManager().getPackageInfo(getPackageName(), 0).lastUpdateTime).getBytes());
                 runOnUiThread(new Runnable() { @Override public void run() {
                     // Новая игра — новые название, обложка и языки на главном экране, когда игрок вернётся.
@@ -1297,5 +1300,159 @@ public final class MainActivity extends Activity {
                 finally { in.close(); out.close(); }
             }
         }
+    }
+
+    // ---- Автоматическая настройка Mewgenics (PPSA37318) и других игр при импорте ----
+    private static final class ElfPatch {
+        final long offset;
+        final byte[] orig;
+        final byte[] patch;
+        ElfPatch(long offset, String origHex, String patchHex) {
+            this.offset = offset;
+            this.orig = hexToBytes(origHex);
+            this.patch = hexToBytes(patchHex);
+        }
+    }
+
+    private static byte[] hexToBytes(String s) {
+        int len = s.length();
+        byte[] data = new byte[len / 2];
+        for (int i = 0; i < len; i += 2) {
+            data[i / 2] = (byte) ((Character.digit(s.charAt(i), 16) << 4)
+                                 + Character.digit(s.charAt(i + 1), 16));
+        }
+        return data;
+    }
+
+    private static final ElfPatch[] MEWGENICS_PATCHES = {
+        // 1080p холст, буферы вывода SDL_GPU, режим экрана и экран мыши
+        new ElfPatch(15222337L, "000f000070080000", "8007000038040000"),
+        new ElfPatch(15224306L, "000f000070080000", "8007000038040000"),
+        new ElfPatch(15231890L, "000f000070080000", "8007000038040000"),
+        new ElfPatch(15232065L, "000f000070080000", "8007000038040000"),
+        new ElfPatch(15234762L, "000f000070080000", "8007000038040000"),
+        new ElfPatch(15235997L, "000f000070080000", "8007000038040000"),
+        new ElfPatch(19424222L, "000f000070080000", "8007000038040000"),
+        new ElfPatch(15235735L, "70080000", "38040000"),
+        new ElfPatch(15235822L, "000f0000", "80070000"),
+        new ElfPatch(15235828L, "000f0000", "80070000"),
+        new ElfPatch(15235892L, "70080000", "38040000"),
+        new ElfPatch(15235940L, "000f0000", "80070000"),
+        new ElfPatch(15235946L, "70080000", "38040000"),
+        new ElfPatch(15222139L, "000000000000f03f", "000000000000e03f"),
+        new ElfPatch(19423100L, "000f0000", "80070000"),
+        new ElfPatch(19423169L, "70080000", "38040000"),
+        new ElfPatch(19391694L, "498b7d10488d735c488d5358e801b8faff", "c7435c80070000c74358380400000f1f00"),
+        new ElfPatch(27708552L, "000f000070080000", "8007000038040000"),
+        new ElfPatch(14837120L, "03", "01"),
+        // SWF BitmapFillAtlas 4096 (против вылетов на заставках)
+        new ElfPatch(15671154L, "e8b91dfaff", "b800100000"),
+        // Оптимизации аллокатора TLSF (lzcnt/tzcnt)
+        new ElfPatch(14832975L, "b93f00000031d2662e0f1f840000000000480fa3c8721348ffc9ffc283fa4075f0", "f3480fbdd0b93f0000004829d183fa4075180f1f8400000000000f1f8000000000"),
+        new ElfPatch(14833209L, "b83f0000006690480fa3c1721548ffc841ffc74183ff4075ee", "f34c0fbdf9b83f0000004c29f84183ff40750f660f1f440000"),
+        new ElfPatch(14834747L, "ba3f000000480fa3d1721a48ffca41ffc74183ff4075ee", "f34c0fbdf9ba3f0000004c29fa4183ff4075120f1f4000"),
+        new ElfPatch(14832723L, "ba3f00000031c9660f1f440000480fa3d0721448ffcaffc183f94075f0", "f3480fbdc8ba3f0000004829ca83f94075150f1f8400000000000f1f00"),
+        new ElfPatch(14834115L, "bf3f00000031f6660f1f440000480fa3f8721448ffcfffc683fe4075f0", "f3480fbdf0bf3f0000004829f783fe4075150f1f8400000000000f1f00"),
+        new ElfPatch(14834371L, "b83f00000031d2660f1f440000480fa3c1721448ffc8ffc283fa4075f0", "f3480fbdd1b83f0000004829d083fa4075150f1f8400000000000f1f00"),
+        new ElfPatch(14834946L, "ba3f0000004531c0660f1f440000480fa3d1721648ffca41ffc04183f84075ee", "f34c0fbdc1ba3f0000004c29c24183f84075170f1f8400000000000f1f440000"),
+        new ElfPatch(14835245L, "ba3f0000004531c966662e0f1f840000000000480fa3d1721648ffca41ffc14183f94075ee", "f34c0fbdc9ba3f0000004c29ca4183f940751c0f1f8400000000000f1f8400000000006690"),
+        new ElfPatch(14835587L, "ba3f00000031c0660f1f440000480fa3d1720f48ffcaffc083f84075f0", "f3480fbdc1ba3f0000004829c283f84075100f1f8400000000000f1f00"),
+        new ElfPatch(14833775L, "bf3f00000031f64989070f1f8000000000480fa3fa721348ffcfffc683fe4075f0", "498907f3480fbdf2bf3f0000004829f783fe4075150f1f8400000000000f1f4000"),
+        new ElfPatch(14833494L, "ba3f00000049890631c941c646200166662e0f1f840000000000480fa3d0723048ffcaffc183f94075f0", "49890641c6462001f3480fbdc8ba3f0000004829ca83f94075360f1f8400000000000f1f840000000000"),
+        new ElfPatch(14835635L, "31c066662e0f1f840000000000480fa3c1720e48ffc04883f84075f1", "f3480fbcc1c30f1f8400000000000f1f840000000000660f1f440000"),
+        new ElfPatch(14833097L, "ba0100000031c9c4e2f1f7f285c6750e48ffc14883f94075ee", "f30fbcc87213eb160f1f8400000000000f1f84000000000090"),
+        new ElfPatch(14833138L, "be0100000031c04c8975980f1f00c4e2f9f7fe85d7750e48ffc04883f84075ee", "4c897598f30fbcc27216eb190f1f8400000000000f1f8400000000000f1f4000"),
+        new ElfPatch(14834261L, "41b80100000031c00f1f00c442f9f7c84185c9750e48ffc04883f84075ed", "f30fbcc17218eb1b0f1f8400000000000f1f840000000000660f1f440000"),
+        new ElfPatch(14834309L, "41b80100000031c00f1f00c442f9f7c84185c9750e48ffc04883f84075ed", "f30fbcc17218eb1b0f1f8400000000000f1f840000000000660f1f440000"),
+        // Линеаризация и знак координат мыши
+        new ElfPatch(14835881L, "83faff0f84fb000000", "e9ff0000000f1f4000"),
+        new ElfPatch(14837357L, "0fb7bd2affffff", "0fbfbd2affffff"),
+        new ElfPatch(14837364L, "0fb78528ffffff", "0fbf8528ffffff")
+    };
+
+    private void patchMewgenicsElf(File elf) {
+        if (!elf.isFile()) return;
+        boolean modified = false;
+        try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(elf, "rw")) {
+            long len = raf.length();
+            for (ElfPatch p : MEWGENICS_PATCHES) {
+                if (p.offset + p.orig.length > len) continue;
+                raf.seek(p.offset);
+                byte[] cur = new byte[p.orig.length];
+                raf.readFully(cur);
+                if (java.util.Arrays.equals(cur, p.patch)) continue;
+                if (java.util.Arrays.equals(cur, p.orig)) {
+                    raf.seek(p.offset);
+                    raf.write(p.patch);
+                    modified = true;
+                }
+            }
+        } catch (Exception e) {
+            android.util.Log.e("AnyPS5", "patchMewgenicsElf error", e);
+        }
+        if (modified) {
+            File cacheDir = new File(getFilesDir(), ".cache/box64");
+            File[] files = cacheDir.listFiles();
+            if (files != null) for (File f : files) if (f.getName().contains("app.elf")) f.delete();
+        }
+    }
+
+    private void extractGameShaders(File game, String titleId) {
+        String assetPath = "games/" + titleId + "/sdlgpu.zip";
+        try (InputStream in = getAssets().open(assetPath);
+             ZipInputStream zip = new ZipInputStream(in)) {
+            File targetDir = new File(game, "sdlgpu");
+            targetDir.mkdirs();
+            byte[] buf = new byte[65536];
+            ZipEntry entry;
+            while ((entry = zip.getNextEntry()) != null) {
+                if (entry.isDirectory()) continue;
+                File out = new File(targetDir, entry.getName());
+                out.getParentFile().mkdirs();
+                try (OutputStream os = new FileOutputStream(out)) {
+                    int n;
+                    while ((n = zip.read(buf)) > 0) os.write(buf, 0, n);
+                }
+                zip.closeEntry();
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private void ensureGameEnv(File game, String titleId) {
+        File env = new File(game, "env.txt");
+        if (!env.isFile()) {
+            try {
+                java.util.List<String> lines = java.util.Arrays.asList(
+                    "APS5_SDLGPU_VULKAN=1",
+                    "APS5_TEXTURE_CACHE_MIB=512",
+                    "TU_MUTABLE_UBWC=1",
+                    "APS5_NO_SUBMISSION_REAPER=1"
+                );
+                Files.write(env.toPath(), lines);
+            } catch (Exception ignored) {}
+        } else {
+            try {
+                java.util.List<String> lines = Files.readAllLines(env.toPath());
+                java.util.List<String> updated = new java.util.ArrayList<>();
+                boolean hasSdlGpu = false;
+                for (String l : lines) {
+                    if (l.trim().startsWith("APS5_PRESENT_CROP=")) continue;
+                    if (l.trim().startsWith("APS5_SDLGPU_VULKAN=")) hasSdlGpu = true;
+                    updated.add(l);
+                }
+                if (!hasSdlGpu) updated.add("APS5_SDLGPU_VULKAN=1");
+                Files.write(env.toPath(), updated);
+            } catch (Exception ignored) {}
+        }
+    }
+
+    private void postRelinkGame(File game) {
+        String id = readTitleId(game);
+        if (id == null) id = game.getName();
+        if ("PPSA37318".equals(id)) {
+            patchMewgenicsElf(new File(game, "app.elf"));
+        }
+        extractGameShaders(game, id);
+        ensureGameEnv(game, id);
     }
 }

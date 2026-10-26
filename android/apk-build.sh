@@ -43,6 +43,7 @@ clang --target=aarch64-linux-android26 -fPIC -shared -O2 -Wall -Wextra -isystem 
 for f in "$X86LIBS"/*.prx; do [ -L "$f" ] || cp "$f" "$OUT/assets/runtime/prx/"; done
 for lib in $GROUP; do cp "$X86STUBS/$lib.prx" "$OUT/assets/runtime/prx/"; done
 cp "$ROOT"/x64lib/* "$OUT/assets/runtime/x64lib/"
+[ -d "$APK/assets" ] && cp -r "$APK/assets/." "$OUT/assets/"
 
 # Компактность: отладочная информация не нужна в APK (таблица символов остаётся — имена в бэктрейсах),
 # ассеты сжимаются (лаунчер распаковывает их потоком при импорте).
@@ -53,6 +54,6 @@ cp "$OUT/resources.ap_" "$OUT/AnyPS5-unsigned.apk"
 KEY="$APK/debug.keystore"
 if [ ! -f "$KEY" ]; then keytool -genkeypair -keystore "$KEY" -storepass android -keypass android -alias androiddebugkey -dname 'CN=Android Debug,O=Android,C=US' -keyalg RSA -keysize 2048 -validity 10000 >/dev/null 2>&1; fi
 zipalign -f -p 4 "$OUT/AnyPS5-unsigned.apk" "$OUT/AnyPS5-aligned.apk"
-apksigner sign --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true --ks "$KEY" --ks-pass pass:android --key-pass pass:android --ks-key-alias androiddebugkey --out "$OUT/PvZ-Replanted.apk" "$OUT/AnyPS5-aligned.apk"
-apksigner verify "$OUT/PvZ-Replanted.apk"
-echo "Built $OUT/PvZ-Replanted.apk"
+apksigner sign --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true --ks "$KEY" --ks-pass pass:android --key-pass pass:android --ks-key-alias androiddebugkey --out "$OUT/Mewgenics.apk" "$OUT/AnyPS5-aligned.apk"
+apksigner verify "$OUT/Mewgenics.apk"
+echo "Built $OUT/Mewgenics.apk"

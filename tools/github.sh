@@ -85,15 +85,17 @@ if [ -d "$APK_DIR" ]; then
   [ -f "$APK_SRC/native/sdl_main.c" ] && cp "$APK_SRC/native/sdl_main.c" "$APK_DIR/native/"
   [ -d "$APK_SRC/src" ] && cp -r "$APK_SRC/src/." "$APK_DIR/src/"
   [ -d "$APK_SRC/res" ] && cp -r "$APK_SRC/res/." "$APK_DIR/res/"
+  [ -d "$APK_SRC/assets" ] && mkdir -p "$APK_DIR/assets" && cp -r "$APK_SRC/assets/." "$APK_DIR/assets/"
+  [ -f "$APK_SRC/apk-build.sh" ] && cp "$APK_SRC/apk-build.sh" "$APK_DIR/build.sh"
   [ -f "$APK_SRC/AndroidManifest.xml" ] && cp "$APK_SRC/AndroidManifest.xml" "$APK_DIR/"
   (cd "$APK_DIR" && bash build.sh) || { fail "build.sh"; exit 1; }
-  APK_FILE="$APK_DIR/out/PvZ-Replanted.apk"
+  APK_FILE="$APK_DIR/out/Mewgenics.apk"
 else
   (cd "$REPO_DIR/android" && bash build.sh) || { fail "build.sh"; exit 1; }
-  APK_FILE="$REPO_DIR/android/out/PvZ-Replanted.apk"
+  APK_FILE="$REPO_DIR/android/out/Mewgenics.apk"
 fi
 [ -f "$APK_FILE" ] || { fail "нет $APK_FILE"; exit 1; }
-su -c "cp '$APK_FILE' /data/local/tmp/pvz.apk && chmod 644 /data/local/tmp/pvz.apk && pm install -r /data/local/tmp/pvz.apk" \
+su -c "cp '$APK_FILE' /data/local/tmp/mewgenics.apk && chmod 644 /data/local/tmp/mewgenics.apk && pm install -r /data/local/tmp/mewgenics.apk" \
   && ok "APK установлен" || { fail "установка APK"; exit 1; }
 
 # 6. env.txt игры. Всё остальное APK выставляет сам: APS5_HOST_FTZ/NAN/FMA/DPP, quad DPP, конвейер отрисовок.

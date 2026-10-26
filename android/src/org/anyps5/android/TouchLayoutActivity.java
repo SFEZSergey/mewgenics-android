@@ -41,7 +41,7 @@ public final class TouchLayoutActivity extends Activity {
         hideSystemBars();
         final float dp = getResources().getDisplayMetrics().density;
         FrameLayout root = new FrameLayout(this);
-        root.setBackground(new android.graphics.drawable.GradientDrawable(android.graphics.drawable.GradientDrawable.Orientation.TL_BR, new int[] {0xff2b4a2e, 0xff142818}));
+        root.setBackground(new android.graphics.drawable.GradientDrawable(android.graphics.drawable.GradientDrawable.Orientation.TL_BR, new int[] {0xff1e1a29, 0xff100d18}));
         controls = new TouchControlsView(this, true);
         root.addView(controls, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
@@ -49,7 +49,7 @@ public final class TouchLayoutActivity extends Activity {
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setGravity(Gravity.CENTER_HORIZONTAL);
         hint = new TextView(this);
-        hint.setTextColor(0xffdcedc8); hint.setTextSize(13); hint.setGravity(Gravity.CENTER);
+        hint.setTextColor(0xffe2d9ec); hint.setTextSize(13); hint.setGravity(Gravity.CENTER);
         hint.setPadding(0, 0, 0, (int)(6*dp));
         panel.addView(hint);
         LinearLayout row1 = new LinearLayout(this); row1.setGravity(Gravity.CENTER);
@@ -89,7 +89,7 @@ public final class TouchLayoutActivity extends Activity {
         final float dp = getResources().getDisplayMetrics().density;
         Button button = new Button(this);
         android.graphics.drawable.GradientDrawable shape = new android.graphics.drawable.GradientDrawable();
-        shape.setColor(0xcc2e5e32); shape.setCornerRadius(12 * dp);
+        shape.setColor(0xcc352b46); shape.setCornerRadius(12 * dp);
         button.setBackground(shape); button.setTextColor(0xffffffff); button.setTextSize(13); button.setAllCaps(false);
         button.setPadding((int)(16*dp), (int)(6*dp), (int)(16*dp), (int)(6*dp));
         button.setText(label);
