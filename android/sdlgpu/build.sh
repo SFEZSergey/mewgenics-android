@@ -5,10 +5,11 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 OUT="${1:-$HERE/libaps5sdlgpu.so}"
 SDL_COMMIT=2747162d9ab6fcb850991434eed9e109e543eebd
-SDL_SRC="${SDL_SRC:-$HOME/ps5-android/src/sdl3-gpu-base/SDL-$SDL_COMMIT}"
-SDL2_INC="${SDL2_INC:-$HOME/ps5-android/src/AnyPS5/3rdparty/SDL2/include}"
+PS5_ROOT="${PS5_ROOT:-$HOME/ps5-android}"
+SDL_SRC="${SDL_SRC:-$PS5_ROOT/src/sdl3-gpu-base/SDL-$SDL_COMMIT}"
+SDL2_INC="${SDL2_INC:-$PS5_ROOT/src/AnyPS5/3rdparty/SDL2/include}"
 [ -d "$SDL2_INC" ] || SDL2_INC="$HERE/../../AnyPS5/3rdparty/SDL2/include"
-VK_INC="${VK_INC:-$HOME/ps5-android/src/AnyPS5/3rdparty/Vulkan-Headers/include}"
+VK_INC="${VK_INC:-$PS5_ROOT/src/AnyPS5/3rdparty/Vulkan-Headers/include}"
 [ -d "$VK_INC" ] || VK_INC="$HERE/../../AnyPS5/3rdparty/Vulkan-Headers/include"
 if [ ! -d "$SDL_SRC/src/gpu" ]; then
   mkdir -p "$(dirname "$SDL_SRC")"

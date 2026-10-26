@@ -16,25 +16,18 @@ fail() { echo -e "\033[31m[FAIL]\033[0m $*"; }
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 [ -f "$SCRIPT_DIR/README.md" ] && SELF_REPO="$SCRIPT_DIR" || SELF_REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-for cand in "${REPO_DIR:-}" "$HOME/mewgenics-android" "$SELF_REPO" "$HOME/ps5-android/pvz-replanted-android" "$HOME/pvz-replanted-android"; do
+for cand in "${REPO_DIR:-}" "$HOME/mewgenics-android" "$SELF_REPO"; do
   if [ -n "$cand" ] && [ -d "$cand" ]; then REPO_DIR="$cand"; break; fi
 done
-PVZ_DIR="${PVZ_DIR:-$HOME/ps5-android/pvz-replanted-android}"
-[ -d "$PVZ_DIR" ] || PVZ_DIR="$HOME/pvz-replanted-android"
+PS5_ROOT="${PS5_ROOT:-$HOME/ps5-android}"
 
-A="${ANYPS5_DIR:-$HOME/ps5-android/src/AnyPS5}"
-[ -d "$A" ] || A="$HOME/ps5-android/AnyPS5"
+A="${ANYPS5_DIR:-$PS5_ROOT/src/AnyPS5}"
+[ -d "$A" ] || A="$PS5_ROOT/AnyPS5"
 [ -d "$A" ] || A="$REPO_DIR/AnyPS5"
-MESA="${MESA_DIR:-$HOME/ps5-android/src/mesa-26.3}"
+MESA="${MESA_DIR:-$PS5_ROOT/src/mesa-26.3}"
 [ -d "$MESA" ] || MESA="$REPO_DIR/mesa"
 MESA_BUILD="${MESA_BUILD:-$MESA/build-android}"
-APK_DIR="${APK_DIR:-$HOME/ps5-android/apk}"
-[ -d "$APK_DIR" ] || APK_DIR="$PVZ_DIR/android"
-[ -d "$APK_DIR" ] || APK_DIR="$REPO_DIR/android"
-
-# Исходники каркаса APK (AndroidManifest.xml, res, src, native)
-APK_SRC="$REPO_DIR/android"
-[ -f "$APK_SRC/AndroidManifest.xml" ] || APK_SRC="$PVZ_DIR/android"
+APK_DIR="${APK_DIR:-$REPO_DIR/android}"
 
 GAME_ID="${GAME_ID:-PPSA37318}"
 P="$REPO_DIR/patches"
@@ -78,22 +71,12 @@ if [ -d "$A/build-x64s" ]; then
   [ "${PIPESTATUS[0]}" = 0 ] && ok "x86 libc/libkernel собраны" || { fail "сборка x86 libc/libkernel"; exit 1; }
 fi
 
-# 5. APK: в папку сборки — свежие лаунчер и libmain из репозитория (build.sh там свой, с путями Termux)
+# 5. APK: собирается прямо в репозитории (android/build.sh)
 echo "=== APK ==="
+export PS5_ROOT="${PS5_ROOT:-$HOME/ps5-android}"
 export SDLGPU_DIR="${SDLGPU_DIR:-$REPO_DIR/android/sdlgpu}"
-if [ -d "$APK_DIR" ]; then
-  [ -f "$APK_SRC/native/sdl_main.c" ] && cp "$APK_SRC/native/sdl_main.c" "$APK_DIR/native/"
-  [ -d "$APK_SRC/src" ] && cp -r "$APK_SRC/src/." "$APK_DIR/src/"
-  [ -d "$APK_SRC/res" ] && cp -r "$APK_SRC/res/." "$APK_DIR/res/"
-  [ -d "$APK_SRC/assets" ] && mkdir -p "$APK_DIR/assets" && cp -r "$APK_SRC/assets/." "$APK_DIR/assets/"
-  [ -f "$APK_SRC/apk-build.sh" ] && cp "$APK_SRC/apk-build.sh" "$APK_DIR/build.sh"
-  [ -f "$APK_SRC/AndroidManifest.xml" ] && cp "$APK_SRC/AndroidManifest.xml" "$APK_DIR/"
-  (cd "$APK_DIR" && bash build.sh) || { fail "build.sh"; exit 1; }
-  APK_FILE="$APK_DIR/out/Mewgenics.apk"
-else
-  (cd "$REPO_DIR/android" && bash build.sh) || { fail "build.sh"; exit 1; }
-  APK_FILE="$REPO_DIR/android/out/Mewgenics.apk"
-fi
+(cd "$APK_DIR" && bash build.sh) || { fail "build.sh"; exit 1; }
+APK_FILE="$APK_DIR/out/Mewgenics.apk"
 [ -f "$APK_FILE" ] || { fail "нет $APK_FILE"; exit 1; }
 su -c "cp '$APK_FILE' /data/local/tmp/mewgenics.apk && chmod 644 /data/local/tmp/mewgenics.apk && pm install -r /data/local/tmp/mewgenics.apk" \
   && ok "APK установлен" || { fail "установка APK"; exit 1; }

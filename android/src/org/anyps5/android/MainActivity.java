@@ -660,7 +660,8 @@ public final class MainActivity extends Activity {
             status.setText(t("Игра готова", "Game is ready") + "\n" + runtimeStatus());
             start.setText(t("Играть", "Play")); start.setEnabled(true); return;
         }
-        if (new File(gameDir, "eboot.bin").isFile()) {
+        if (findEbootDirect(gameDir) != null || new File(gameDir, "eboot.bin").isFile()) {
+            normalizeEbootName(gameDir);
             status.setText(t("Дамп скопирован, подготовка не закончена", "The dump is copied, preparation is not finished") + "\n" + runtimeStatus());
             start.setText(t("Продолжить импорт", "Continue the import")); start.setEnabled(true); return;
         }
@@ -675,7 +676,10 @@ public final class MainActivity extends Activity {
         try { return Files.readSymbolicLink(activeGame().toPath()).getFileName().toString(); } catch (Exception e) { return null; }
     }
     private static JSONObject readParam(File dir) {
-        for (String path : new String[] {"sce_sys/param.json", "app0/sce_sys/param.json", "dump/sce_sys/param.json"}) {
+        for (String path : new String[] {
+            "sce_sys/param.json", "app0/sce_sys/param.json", "dump/sce_sys/param.json",
+            "SCE_SYS/param.json", "SCE_SYS/PARAM.JSON", "sce_sys/PARAM.JSON", "PARAM.JSON", "param.json"
+        }) {
             try { return new JSONObject(new String(Files.readAllBytes(new File(dir, path).toPath()), "UTF-8")); } catch (Exception ignored) {}
         }
         return null;
@@ -799,7 +803,34 @@ public final class MainActivity extends Activity {
             } })
             .setNegativeButton(t("Отмена", "Cancel"), null).show();
     }
+    private boolean storagePermissionRequested = false;
     private void chooseDirectory() {
+        if (!storagePermissionRequested) {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                if (!android.os.Environment.isExternalStorageManager()) {
+                    storagePermissionRequested = true;
+                    try {
+                        Intent intent = new Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
+                        intent.setData(Uri.parse("package:" + getPackageName()));
+                        startActivity(intent);
+                        android.widget.Toast.makeText(this, t("Разрешите доступ к файлам для быстрого копирования дампа (15 секунд)", "Allow file access for fast dump copying (15 seconds)"), android.widget.Toast.LENGTH_LONG).show();
+                        return;
+                    } catch (Exception e) {
+                        try {
+                            Intent intent = new Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION);
+                            startActivity(intent);
+                            return;
+                        } catch (Exception ignored) {}
+                    }
+                }
+            } else if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                if (checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                    storagePermissionRequested = true;
+                    requestPermissions(new String[]{android.Manifest.permission.READ_EXTERNAL_STORAGE}, 101);
+                    return;
+                }
+            }
+        }
         Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
         i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
         startActivityForResult(i, PICK_GAME_DIRECTORY);
@@ -934,7 +965,8 @@ public final class MainActivity extends Activity {
     private void importAndStart(final boolean fresh) {
         final String value = selectedTree();
         final File game = new File(getFilesDir(), "game");
-        if (new File(game, "app.elf").isFile() && new File(game, "libs").isDirectory() && new File(game, "eboot.bin").isFile() && (hasUnlinkedGameModules(game) || staleRelinkLayout(game))) {
+        if (new File(game, "app.elf").isFile() && new File(game, "libs").isDirectory() && (findEbootDirect(game) != null || new File(game, "eboot.bin").isFile()) && (hasUnlinkedGameModules(game) || staleRelinkLayout(game))) {
+            normalizeEbootName(game);
             // app.elf собран без модулей игры из Media или по старой раскладке: перелинковка заново из eboot.bin.
             new File(game, "app.elf").delete();
         }
@@ -959,7 +991,7 @@ public final class MainActivity extends Activity {
             }}).start();
             return;
         }
-        final boolean dumpAlreadyPresent = !fresh && new File(game, "eboot.bin").isFile();
+        final boolean dumpAlreadyPresent = !fresh && (findEbootDirect(game) != null || new File(game, "eboot.bin").isFile());
         if (!dumpAlreadyPresent && (!fresh || value == null)) return;
         start.setEnabled(false);
         status.setText(dumpAlreadyPresent ? t("Дамп найден в папке игры; использую имеющиеся файлы…", "Dump found in the game folder; using the existing files…") : t("Подготовка к копированию…", "Preparing to copy…"));
@@ -974,7 +1006,7 @@ public final class MainActivity extends Activity {
                     final CopyProgress p = new CopyProgress();
                     if (directSource != null && directSource.isDirectory() && directSource.canRead()) {
                         File dumpDir = new File(directSource, "dump");
-                        File effective = (dumpDir.isDirectory() && !new File(directSource, "eboot.bin").isFile()) ? dumpDir : directSource;
+                        File effective = (dumpDir.isDirectory() && findEbootDirect(directSource) == null && !new File(directSource, "eboot.bin").isFile()) ? dumpDir : directSource;
                         statusOnUi(t("Подсчитываю файлы…", "Scanning files…"));
                         countDirect(effective, p);
                         statusOnUi(t("Копирование напрямую (Direct I/O)…", "Copying via Direct I/O…"));
@@ -985,10 +1017,11 @@ public final class MainActivity extends Activity {
                     }
                     updateCopyStatus(p, true);
                     findAndFlattenDumpRoot(staging);
-                    if (!new File(staging, "eboot.bin").isFile()) {
+                    if (findEbootDirect(staging) == null && !new File(staging, "eboot.bin").isFile()) {
                         clearDirectory(staging);
                         throw new Exception(t("В выбранной папке не найден eboot.bin. Выберите сам каталог дампа.", "No eboot.bin in the chosen folder. Pick the dump folder itself."));
                     }
+                    normalizeEbootName(staging);
                     String id = readTitleId(staging);
                     if (id == null) id = "game-" + (System.currentTimeMillis() / 1000);
                     File target = new File(gamesDir(), id);
@@ -1010,6 +1043,7 @@ public final class MainActivity extends Activity {
     }
 
     private void setupAndStartGame(File game, final boolean fresh) throws Exception {
+        normalizeEbootName(game);
         File self = new File(game, "eboot.bin");
         if (!self.isFile()) throw new Exception(t("В выбранной папке не найден eboot.bin. Выберите сам каталог дампа.", "No eboot.bin in the chosen folder. Pick the dump folder itself."));
         File executable = new File(game, "app.elf");
@@ -1349,8 +1383,15 @@ public final class MainActivity extends Activity {
 
     private static File resolveDocIdToFile(String docId) {
         if (docId == null) return null;
+        if (docId.startsWith("raw:")) {
+            File raw = new File(docId.substring(4));
+            if (raw.exists()) return raw;
+        }
         int colon = docId.indexOf(':');
-        if (colon < 0) return null;
+        if (colon < 0) {
+            File direct = new File(docId);
+            return direct.exists() ? direct : null;
+        }
         String volume = docId.substring(0, colon);
         String relPath = docId.substring(colon + 1);
         File base;
@@ -1435,39 +1476,120 @@ public final class MainActivity extends Activity {
         } finally { cursor.close(); }
     }
 
-    private static void findAndFlattenDumpRoot(File staging) {
-        if (new File(staging, "eboot.bin").isFile()) return;
-        File current = staging;
-        for (int depth = 0; depth < 3; depth++) {
-            File[] list = current.listFiles();
-            if (list == null) break;
-            File singleSubDir = null;
-            int dirCount = 0;
-            for (File f : list) {
-                if (f.isDirectory()) {
-                    if (new File(f, "eboot.bin").isFile()) {
-                        singleSubDir = f;
-                        break;
-                    }
-                    dirCount++;
-                    singleSubDir = f;
-                }
-            }
-            if (singleSubDir != null && (new File(singleSubDir, "eboot.bin").isFile() || dirCount == 1)) {
-                File[] subFiles = singleSubDir.listFiles();
-                if (subFiles != null) {
-                    for (File f : subFiles) {
-                        File dest = new File(staging, f.getName());
-                        if (dest.exists()) clearDirectory(dest);
-                        f.renameTo(dest);
-                    }
-                }
-                singleSubDir.delete();
-                if (new File(staging, "eboot.bin").isFile()) return;
-            } else {
-                break;
+    // Найти eboot.bin с любым регистром прямо в папке dir
+    private static File findEbootDirect(File dir) {
+        if (dir == null || !dir.isDirectory()) return null;
+        File[] files = dir.listFiles();
+        if (files == null) return null;
+        for (File f : files) {
+            if (f.isFile() && "eboot.bin".equalsIgnoreCase(f.getName())) return f;
+        }
+        return null;
+    }
+
+    // Рекурсивный поиск eboot.bin / EBOOT.BIN на глубину до maxDepth
+    private static File findEbootRecursive(File dir, int maxDepth) {
+        if (dir == null || !dir.isDirectory() || maxDepth < 0) return null;
+        File direct = findEbootDirect(dir);
+        if (direct != null) return direct;
+        File[] subdirs = dir.listFiles();
+        if (subdirs == null) return null;
+        for (File f : subdirs) {
+            if (f.isDirectory()) {
+                File found = findEbootRecursive(f, maxDepth - 1);
+                if (found != null) return found;
             }
         }
+        return null;
+    }
+
+    private static File findFileRecursive(File dir, String filename, int maxDepth) {
+        if (dir == null || !dir.isDirectory() || maxDepth < 0) return null;
+        File[] files = dir.listFiles();
+        if (files == null) return null;
+        for (File f : files) {
+            if (f.isFile() && filename.equalsIgnoreCase(f.getName())) return f;
+        }
+        for (File f : files) {
+            if (f.isDirectory()) {
+                File found = findFileRecursive(f, filename, maxDepth - 1);
+                if (found != null) return found;
+            }
+        }
+        return null;
+    }
+
+    // Приведение имени eboot.bin к нижнему регистру (EBOOT.BIN -> eboot.bin)
+    private static boolean normalizeEbootName(File dir) {
+        File found = findEbootDirect(dir);
+        if (found == null) return false;
+        if (found.getName().equals("eboot.bin")) return true;
+        File target = new File(dir, "eboot.bin");
+        File temp = new File(dir, ".eboot_tmp_" + System.currentTimeMillis());
+        if (found.renameTo(temp)) {
+            return temp.renameTo(target);
+        }
+        return found.renameTo(target);
+    }
+
+    private static void copyFileOrDir(File src, File dst) throws Exception {
+        if (src.isDirectory()) {
+            dst.mkdirs();
+            File[] files = src.listFiles();
+            if (files != null) for (File f : files) copyFileOrDir(f, new File(dst, f.getName()));
+        } else if (src.isFile()) {
+            dst.getParentFile().mkdirs();
+            Files.copy(src.toPath(), dst.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    private static void moveContents(File srcDir, File destDir) {
+        File[] items = srcDir.listFiles();
+        if (items == null) return;
+        for (File item : items) {
+            File target = new File(destDir, item.getName());
+            if (target.exists()) clearDirectory(target);
+            if (!item.renameTo(target)) {
+                try {
+                    copyFileOrDir(item, target);
+                    clearDirectory(item);
+                } catch (Exception ignored) {}
+            }
+        }
+    }
+
+    private static void findAndFlattenDumpRoot(File staging) {
+        File eboot = findEbootRecursive(staging, 4);
+        if (eboot == null) {
+            for (String altName : new String[] {"eboot.elf", "app.elf"}) {
+                File alt = findFileRecursive(staging, altName, 4);
+                if (alt != null) {
+                    File target = new File(alt.getParentFile(), "eboot.bin");
+                    try { Files.copy(alt.toPath(), target.toPath()); eboot = target; break; } catch (Exception ignored) {}
+                }
+            }
+        }
+        if (eboot == null) return;
+
+        File dumpFolder = eboot.getParentFile();
+        if (dumpFolder != null && dumpFolder.getName().equalsIgnoreCase("app0") && !dumpFolder.equals(staging)) {
+            File parent = dumpFolder.getParentFile();
+            moveContents(dumpFolder, parent);
+            clearDirectory(dumpFolder);
+            dumpFolder = parent;
+        }
+
+        if (dumpFolder != null && !dumpFolder.equals(staging)) {
+            moveContents(dumpFolder, staging);
+            File cur = dumpFolder;
+            while (cur != null && !cur.equals(staging)) {
+                File p = cur.getParentFile();
+                clearDirectory(cur);
+                cur = p;
+            }
+        }
+
+        normalizeEbootName(staging);
     }
 
     private void importZipArchive(final Uri uri) {
@@ -1508,10 +1630,11 @@ public final class MainActivity extends Activity {
                 }
                 updateCopyStatus(p, true);
                 findAndFlattenDumpRoot(staging);
-                if (!new File(staging, "eboot.bin").isFile()) {
+                if (findEbootDirect(staging) == null && !new File(staging, "eboot.bin").isFile()) {
                     clearDirectory(staging);
                     throw new Exception(t("В архиве не найден eboot.bin. Убедитесь, что внутри лежит дамп игры.", "No eboot.bin in the archive. Make sure it contains the game dump."));
                 }
+                normalizeEbootName(staging);
                 String id = readTitleId(staging);
                 if (id == null) id = "game-" + (System.currentTimeMillis() / 1000);
                 File target = new File(gamesDir(), id);
