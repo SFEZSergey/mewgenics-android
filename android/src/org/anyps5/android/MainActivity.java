@@ -34,6 +34,7 @@ public final class MainActivity extends Activity {
     private static final int PICK_GAME_DIRECTORY = 10;
     private static final int PICK_DRIVER_PACKAGE = 11;
     private static final int SAVE_LOGS = 12;
+    private static final int PICK_GAME_ZIP = 13;
     private Button driverButton, gameLanguageButton, uiLanguageButton;
     private TextView status;
     private Button start;
@@ -663,7 +664,7 @@ public final class MainActivity extends Activity {
             status.setText(t("Дамп скопирован, подготовка не закончена", "The dump is copied, preparation is not finished") + "\n" + runtimeStatus());
             start.setText(t("Продолжить импорт", "Continue the import")); start.setEnabled(true); return;
         }
-        status.setText(t("Игр пока нет: «Игры» → «Добавить игру» и папка дампа (где лежит eboot.bin)", "No games yet: Games → Add a game, then the dump folder (the one with eboot.bin)") + "\n" + runtimeStatus());
+        status.setText(t("Игр пока нет: «Игры» → «+ Добавить игру» (папка или .zip-архив с дампом)", "No games yet: Games → Add a game (dump folder or .zip archive)") + "\n" + runtimeStatus());
         start.setText(t("Играть", "Play")); start.setEnabled(false);
     }
 
@@ -746,8 +747,33 @@ public final class MainActivity extends Activity {
             }
             dialog.setItems(labels, new DialogInterface.OnClickListener() { @Override public void onClick(DialogInterface d, int which) { gameActions(list.get(which)); } });
         }
-        dialog.setPositiveButton(t("+ Добавить игру", "+ Add a game"), new DialogInterface.OnClickListener() { @Override public void onClick(DialogInterface d, int w) { chooseDirectory(); } })
+        dialog.setPositiveButton(t("+ Добавить игру", "+ Add a game"), new DialogInterface.OnClickListener() { @Override public void onClick(DialogInterface d, int w) { showAddGameDialog(); } })
             .setNegativeButton(t("Закрыть", "Close"), null).show();
+    }
+    private void showAddGameDialog() {
+        String[] options = {
+            t("📁 Папка с дампом (где лежит eboot.bin)", "📁 Dump folder (with eboot.bin)"),
+            t("📦 Архив дампа (.zip)", "📦 Dump archive (.zip)")
+        };
+        new AlertDialog.Builder(this)
+            .setTitle(t("Добавить игру", "Add a game"))
+            .setItems(options, new DialogInterface.OnClickListener() {
+                @Override public void onClick(DialogInterface d, int which) {
+                    if (which == 0) chooseDirectory();
+                    else chooseZipArchive();
+                }
+            })
+            .setNegativeButton(t("Отмена", "Cancel"), null)
+            .show();
+    }
+    private void chooseZipArchive() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
+        i.putExtra(Intent.EXTRA_MIME_TYPES, new String[] {
+            "application/zip", "application/x-zip-compressed", "application/octet-stream"
+        });
+        startActivityForResult(i, PICK_GAME_ZIP);
     }
     private void gameActions(final File dir) {
         String name = readTitleName(dir);
@@ -791,9 +817,17 @@ public final class MainActivity extends Activity {
         if (request == PICK_GAME_DIRECTORY && result == RESULT_OK && data != null && data.getData() != null) {
             Uri uri = data.getData();
             int flags = data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
-            getContentResolver().takePersistableUriPermission(uri, flags);
+            try { getContentResolver().takePersistableUriPermission(uri, flags); } catch (Exception ignored) {}
             getPreferences(MODE_PRIVATE).edit().putString("game_tree", uri.toString()).apply();
             importAndStart(true);
+            return;
+        }
+        if (request == PICK_GAME_ZIP && result == RESULT_OK && data != null && data.getData() != null) {
+            Uri uri = data.getData();
+            int flags = data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            try { getContentResolver().takePersistableUriPermission(uri, flags); } catch (Exception ignored) {}
+            importZipArchive(uri);
+            return;
         }
     }
 
@@ -928,25 +962,36 @@ public final class MainActivity extends Activity {
         final boolean dumpAlreadyPresent = !fresh && new File(game, "eboot.bin").isFile();
         if (!dumpAlreadyPresent && (!fresh || value == null)) return;
         start.setEnabled(false);
-        status.setText(dumpAlreadyPresent ? t("Дамп найден в папке игры; использую имеющиеся файлы…", "Dump found in the game folder; using the existing files…") : t("Копирую папку игры… Это может занять несколько минут.", "Copying the game folder… This can take a few minutes."));
+        status.setText(dumpAlreadyPresent ? t("Дамп найден в папке игры; использую имеющиеся файлы…", "Dump found in the game folder; using the existing files…") : t("Подготовка к копированию…", "Preparing to copy…"));
         new Thread(new Runnable() { @Override public void run() {
             try {
                 if (!dumpAlreadyPresent) {
-                    // Новая игра: копия в games/.importing, затем games/<ID из param.json> (та же игра заменяется),
-                    // и она становится выбранной (files/game).
                     File staging = new File(gamesDir(), ".importing");
                     clearDirectory(staging); staging.mkdirs();
-                    // Accept the selected dump directly; if the saved SAF selection is
-                    // its parent, import only the immediate child named "dump".
                     Uri tree = Uri.parse(value);
                     String rootId = DocumentsContract.getTreeDocumentId(tree);
-                    String dumpId = findDumpDocument(tree, rootId);
-                    copyTree(tree, dumpId == null ? rootId : dumpId, staging);
-                    if (!new File(staging, "eboot.bin").isFile()) { clearDirectory(staging); throw new Exception(t("В выбранной папке не найден eboot.bin. Выберите сам каталог дампа.", "No eboot.bin in the chosen folder. Pick the dump folder itself.")); }
+                    File directSource = resolveDocIdToFile(rootId);
+                    final CopyProgress p = new CopyProgress();
+                    if (directSource != null && directSource.isDirectory() && directSource.canRead()) {
+                        File dumpDir = new File(directSource, "dump");
+                        File effective = (dumpDir.isDirectory() && !new File(directSource, "eboot.bin").isFile()) ? dumpDir : directSource;
+                        statusOnUi(t("Подсчитываю файлы…", "Scanning files…"));
+                        countDirect(effective, p);
+                        statusOnUi(t("Копирование напрямую (Direct I/O)…", "Copying via Direct I/O…"));
+                        copyDirect(effective, staging, p);
+                    } else {
+                        String dumpId = findDumpDocument(tree, rootId);
+                        copyTreeSAF(tree, dumpId == null ? rootId : dumpId, staging, p);
+                    }
+                    updateCopyStatus(p, true);
+                    findAndFlattenDumpRoot(staging);
+                    if (!new File(staging, "eboot.bin").isFile()) {
+                        clearDirectory(staging);
+                        throw new Exception(t("В выбранной папке не найден eboot.bin. Выберите сам каталог дампа.", "No eboot.bin in the chosen folder. Pick the dump folder itself."));
+                    }
                     String id = readTitleId(staging);
                     if (id == null) id = "game-" + (System.currentTimeMillis() / 1000);
                     File target = new File(gamesDir(), id);
-                    // Та же игра заново: её сохранения и загруженные данные переходят в новую копию.
                     for (String kept : new String[] {"_sd", "_sd_mem", "download0"}) {
                         File old = new File(target, kept), copy = new File(staging, kept);
                         if (old.exists() && !copy.exists()) Files.move(old.toPath(), copy.toPath());
@@ -955,33 +1000,41 @@ public final class MainActivity extends Activity {
                     if (!staging.renameTo(target)) throw new Exception("Не удалось перенести игру в games/" + id);
                     activate(id);
                 }
-                File self = new File(game, "eboot.bin");
-                if (!self.isFile()) throw new Exception("В выбранной папке не найден eboot.bin. Выбери сам каталог дампа.");
-                File executable = new File(game, "app.elf");
-                if (!executable.isFile()) {
-                    statusOnUi(t("Извлекаю ELF из eboot.bin…", "Extracting the ELF from eboot.bin…"));
-                    extractSelf(self, new File(game, "eboot.elf"));
-                    stageGameModules(game);
-                    extractSelfModules(game);
-                    statusOnUi(t("Запускаю AnyPS5 relinker…", "Running the AnyPS5 relinker…"));
-                    runRelinker(game);
-                    Files.write(new File(game, ".relink-layout").toPath(), relinkLayout(game).getBytes());
-                }
-                if (!executable.isFile()) throw new Exception("Relinker завершился, но app.elf не создан");
-                // Repair links even when an earlier import already created app.elf.
-                linkGameResources(game);
-                if (!executable.setExecutable(true, false)) throw new Exception("Не удалось разрешить запуск app.elf");
-                copyPackagedRuntime("runtime/prx", new File(game, "libs"));
-                linkGuestPrxLibraries(game);
-                copyPackagedRuntime("runtime/x64lib", new File(game, "x64lib"));
-                postRelinkGame(game);
-                Files.write(new File(game, ".runtime-stamp").toPath(), Long.toString(getPackageManager().getPackageInfo(getPackageName(), 0).lastUpdateTime).getBytes());
+                setupAndStartGame(game, fresh);
+            } catch (final Throwable e) {
                 runOnUiThread(new Runnable() { @Override public void run() {
-                    // Новая игра — новые название, обложка и языки на главном экране, когда игрок вернётся.
-                    if (fresh) refreshOnReturn = true;
-                    applyGameLanguage();
-                    startActivity(new Intent(MainActivity.this, GameActivity.class));
+                    status.setText(t("Импорт не удался:\n", "Import failed:\n") + e.getMessage()); start.setEnabled(true);
                 }});
+            }
+        }}).start();
+    }
+
+    private void setupAndStartGame(File game, final boolean fresh) throws Exception {
+        File self = new File(game, "eboot.bin");
+        if (!self.isFile()) throw new Exception(t("В выбранной папке не найден eboot.bin. Выберите сам каталог дампа.", "No eboot.bin in the chosen folder. Pick the dump folder itself."));
+        File executable = new File(game, "app.elf");
+        if (!executable.isFile()) {
+            statusOnUi(t("Извлекаю ELF из eboot.bin…", "Extracting the ELF from eboot.bin…"));
+            extractSelf(self, new File(game, "eboot.elf"));
+            stageGameModules(game);
+            extractSelfModules(game);
+            statusOnUi(t("Запускаю AnyPS5 relinker…", "Running the AnyPS5 relinker…"));
+            runRelinker(game);
+            Files.write(new File(game, ".relink-layout").toPath(), relinkLayout(game).getBytes());
+        }
+        if (!executable.isFile()) throw new Exception("Relinker завершился, но app.elf не создан");
+        linkGameResources(game);
+        if (!executable.setExecutable(true, false)) throw new Exception("Не удалось разрешить запуск app.elf");
+        copyPackagedRuntime("runtime/prx", new File(game, "libs"));
+        linkGuestPrxLibraries(game);
+        copyPackagedRuntime("runtime/x64lib", new File(game, "x64lib"));
+        postRelinkGame(game);
+        Files.write(new File(game, ".runtime-stamp").toPath(), Long.toString(getPackageManager().getPackageInfo(getPackageName(), 0).lastUpdateTime).getBytes());
+        runOnUiThread(new Runnable() { @Override public void run() {
+            if (fresh) refreshOnReturn = true;
+            applyGameLanguage();
+            startActivity(new Intent(MainActivity.this, GameActivity.class));
+        }});
             } catch (final Throwable e) {
                 runOnUiThread(new Runnable() { @Override public void run() {
                     status.setText(t("Импорт не удался:\n", "Import failed:\n") + e.getMessage()); start.setEnabled(true);
@@ -1257,13 +1310,105 @@ public final class MainActivity extends Activity {
             return hasEboot ? null : dumpId;
         } finally { cursor.close(); }
     }
-    private void clearDirectory(File file) {
+    private static void clearDirectory(File file) {
         // File.isDirectory follows symlinks; remove the link without traversing it.
         if (Files.isSymbolicLink(file.toPath())) { file.delete(); return; }
         if (file.isDirectory()) { File[] children = file.listFiles(); if (children != null) for (File child : children) clearDirectory(child); }
         if (file.exists()) file.delete();
     }
-    private void copyTree(Uri tree, String documentId, File destination) throws Exception {
+
+    private static final class CopyProgress {
+        long totalBytes = 0;
+        int totalFiles = 0;
+        long copiedBytes = 0;
+        int copiedFiles = 0;
+        long lastUpdateMs = 0;
+        String currentFile = "";
+    }
+
+    private static String formatBytes(long b) {
+        if (b >= 1024L * 1024L * 1024L) return String.format(Locale.US, "%.2f GB", (double) b / (1024.0 * 1024.0 * 1024.0));
+        if (b >= 1024L * 1024L) return String.format(Locale.US, "%.1f MB", (double) b / (1024.0 * 1024.0));
+        return String.format(Locale.US, "%.0f KB", (double) b / 1024.0);
+    }
+
+    private void updateCopyStatus(CopyProgress p, boolean force) {
+        long now = System.currentTimeMillis();
+        if (!force && (now - p.lastUpdateMs < 120)) return;
+        p.lastUpdateMs = now;
+        final String text;
+        if (p.totalBytes > 0) {
+            float pct = (float) p.copiedBytes * 100f / (float) p.totalBytes;
+            if (pct > 100f) pct = 100f;
+            text = String.format(Locale.getDefault(), t(
+                "Копирование: %s / %s (%.1f%%)\nФайл %d: %s",
+                "Copying: %s / %s (%.1f%%)\nFile %d: %s"),
+                formatBytes(p.copiedBytes), formatBytes(p.totalBytes), pct, p.copiedFiles, p.currentFile);
+        } else {
+            text = String.format(Locale.getDefault(), t(
+                "Копирование: %s (%d файлов)\n%s",
+                "Copying: %s (%d files)\n%s"),
+                formatBytes(p.copiedBytes), p.copiedFiles, p.currentFile);
+        }
+        statusOnUi(text);
+    }
+
+    private static File resolveDocIdToFile(String docId) {
+        if (docId == null) return null;
+        int colon = docId.indexOf(':');
+        if (colon < 0) return null;
+        String volume = docId.substring(0, colon);
+        String relPath = docId.substring(colon + 1);
+        File base;
+        if ("primary".equalsIgnoreCase(volume)) {
+            base = android.os.Environment.getExternalStorageDirectory();
+        } else {
+            base = new File("/storage/" + volume);
+            if (!base.exists()) base = new File("/mnt/media_rw/" + volume);
+        }
+        File candidate = new File(base, relPath);
+        return candidate.exists() ? candidate : null;
+    }
+
+    private static void countDirect(File file, CopyProgress p) {
+        if (file.isDirectory()) {
+            File[] list = file.listFiles();
+            if (list != null) for (File f : list) countDirect(f, p);
+        } else if (file.isFile()) {
+            p.totalFiles++;
+            p.totalBytes += file.length();
+        }
+    }
+
+    private void copyDirect(File source, File destination, CopyProgress p) throws Exception {
+        if (source.isDirectory()) {
+            destination.mkdirs();
+            File[] files = source.listFiles();
+            if (files != null) for (File f : files) copyDirect(f, new File(destination, f.getName()), p);
+        } else if (source.isFile()) {
+            destination.getParentFile().mkdirs();
+            p.currentFile = source.getName();
+            p.copiedFiles++;
+            try (java.io.FileInputStream fis = new java.io.FileInputStream(source);
+                 java.io.FileOutputStream fos = new java.io.FileOutputStream(destination);
+                 java.nio.channels.FileChannel from = fis.getChannel();
+                 java.nio.channels.FileChannel to = fos.getChannel()) {
+                long size = from.size();
+                long transferred = 0;
+                long chunk = 2 * 1024 * 1024L;
+                while (transferred < size) {
+                    long n = to.transferFrom(from, transferred, Math.min(chunk, size - transferred));
+                    if (n <= 0) break;
+                    transferred += n;
+                    p.copiedBytes += n;
+                    updateCopyStatus(p, false);
+                }
+            }
+            updateCopyStatus(p, false);
+        }
+    }
+
+    private void copyTreeSAF(Uri tree, String documentId, File destination, CopyProgress p) throws Exception {
         Uri childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(tree, documentId);
         String[] columns = { DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_DISPLAY_NAME, DocumentsContract.Document.COLUMN_MIME_TYPE };
         Cursor cursor = getContentResolver().query(childrenUri, columns, null, null, null);
@@ -1273,17 +1418,124 @@ public final class MainActivity extends Activity {
                 String childId = cursor.getString(0); String name = cursor.getString(1); String mime = cursor.getString(2);
                 File target = new File(destination, name);
                 if (DocumentsContract.Document.MIME_TYPE_DIR.equals(mime)) {
-                    target.mkdirs(); copyTree(tree, childId, target);
+                    target.mkdirs(); copyTreeSAF(tree, childId, target, p);
                 } else {
+                    p.currentFile = name;
+                    p.copiedFiles++;
                     Uri childUri = DocumentsContract.buildDocumentUriUsingTree(tree, childId);
                     InputStream in = getContentResolver().openInputStream(childUri);
                     if (in == null) throw new Exception("Не удалось прочитать файл: " + name);
                     OutputStream out = new FileOutputStream(target);
-                    try { byte[] buffer = new byte[1024 * 1024]; int count; while ((count = in.read(buffer)) != -1) out.write(buffer, 0, count); }
+                    try {
+                        byte[] buffer = new byte[1024 * 1024]; int count;
+                        while ((count = in.read(buffer)) != -1) {
+                            out.write(buffer, 0, count);
+                            p.copiedBytes += count;
+                            updateCopyStatus(p, false);
+                        }
+                    }
                     finally { in.close(); out.close(); }
+                    updateCopyStatus(p, false);
                 }
             }
         } finally { cursor.close(); }
+    }
+
+    private static void findAndFlattenDumpRoot(File staging) {
+        if (new File(staging, "eboot.bin").isFile()) return;
+        File current = staging;
+        for (int depth = 0; depth < 3; depth++) {
+            File[] list = current.listFiles();
+            if (list == null) break;
+            File singleSubDir = null;
+            int dirCount = 0;
+            for (File f : list) {
+                if (f.isDirectory()) {
+                    if (new File(f, "eboot.bin").isFile()) {
+                        singleSubDir = f;
+                        break;
+                    }
+                    dirCount++;
+                    singleSubDir = f;
+                }
+            }
+            if (singleSubDir != null && (new File(singleSubDir, "eboot.bin").isFile() || dirCount == 1)) {
+                File[] subFiles = singleSubDir.listFiles();
+                if (subFiles != null) {
+                    for (File f : subFiles) {
+                        File dest = new File(staging, f.getName());
+                        if (dest.exists()) clearDirectory(dest);
+                        f.renameTo(dest);
+                    }
+                }
+                singleSubDir.delete();
+                if (new File(staging, "eboot.bin").isFile()) return;
+            } else {
+                break;
+            }
+        }
+    }
+
+    private void importZipArchive(final Uri uri) {
+        start.setEnabled(false);
+        status.setText(t("Подготовка к распаковке архива…", "Preparing archive extraction…"));
+        new Thread(new Runnable() { @Override public void run() {
+            try {
+                File staging = new File(gamesDir(), ".importing");
+                clearDirectory(staging); staging.mkdirs();
+                final CopyProgress p = new CopyProgress();
+                try (InputStream raw = getContentResolver().openInputStream(uri)) {
+                    if (raw == null) throw new Exception("Не удалось открыть архив");
+                    try (java.io.BufferedInputStream bis = new java.io.BufferedInputStream(raw, 2 * 1024 * 1024);
+                         ZipInputStream zis = new ZipInputStream(bis)) {
+                        ZipEntry entry;
+                        byte[] buffer = new byte[1024 * 1024];
+                        final String rootPath = staging.getCanonicalPath() + File.separator;
+                        while ((entry = zis.getNextEntry()) != null) {
+                            if (entry.isDirectory()) continue;
+                            String name = entry.getName();
+                            File out = new File(staging, name);
+                            if (!out.getCanonicalPath().startsWith(rootPath)) continue;
+                            out.getParentFile().mkdirs();
+                            p.currentFile = out.getName();
+                            p.copiedFiles++;
+                            try (OutputStream fos = new FileOutputStream(out)) {
+                                int n;
+                                while ((n = zis.read(buffer)) > 0) {
+                                    fos.write(buffer, 0, n);
+                                    p.copiedBytes += n;
+                                    updateCopyStatus(p, false);
+                                }
+                            }
+                            zis.closeEntry();
+                            updateCopyStatus(p, false);
+                        }
+                    }
+                }
+                updateCopyStatus(p, true);
+                findAndFlattenDumpRoot(staging);
+                if (!new File(staging, "eboot.bin").isFile()) {
+                    clearDirectory(staging);
+                    throw new Exception(t("В архиве не найден eboot.bin. Убедитесь, что внутри лежит дамп игры.", "No eboot.bin in the archive. Make sure it contains the game dump."));
+                }
+                String id = readTitleId(staging);
+                if (id == null) id = "game-" + (System.currentTimeMillis() / 1000);
+                File target = new File(gamesDir(), id);
+                for (String kept : new String[] {"_sd", "_sd_mem", "download0"}) {
+                    File old = new File(target, kept), copy = new File(staging, kept);
+                    if (old.exists() && !copy.exists()) Files.move(old.toPath(), copy.toPath());
+                }
+                clearDirectory(target);
+                if (!staging.renameTo(target)) throw new Exception("Не удалось перенести игру в games/" + id);
+                activate(id);
+                setupAndStartGame(activeGame(), true);
+            } catch (final Throwable e) {
+                runOnUiThread(new Runnable() { @Override public void run() {
+                    status.setText(t("Распаковка архива не удалась:\n", "Archive extraction failed:\n") + e.getMessage());
+                    start.setEnabled(true);
+                }});
+            }
+        }}).start();
     }
     private void copyPackagedRuntime(String assetPath, File destination) throws Exception {
         destination.mkdirs();
