@@ -1,8 +1,13 @@
 diff --git a/core/libs/prx/libSceMouse/src/mouse_impl.cpp b/core/libs/prx/libSceMouse/src/mouse_impl.cpp
-index 8bcb0c4..186bf4b 100644
+index 8bcb0c4..428d5c2 100644
 --- a/core/libs/prx/libSceMouse/src/mouse_impl.cpp
 +++ b/core/libs/prx/libSceMouse/src/mouse_impl.cpp
-@@ -30,6 +30,9 @@ double absoluteY = 1080.0;
+@@ -1,3 +1,4 @@
++#include <dlfcn.h>
+ #include "prx/libSceMouse/include/MouseState.hpp"
+ #include "prx/libkernel/Time/include/Time.hpp"
+ 
+@@ -30,6 +31,9 @@ double absoluteY = 1080.0;
  std::int32_t screenWidth = 3840;
  std::int32_t screenHeight = 2160;
  std::int32_t absoluteWheel = 0;
@@ -12,7 +17,7 @@ index 8bcb0c4..186bf4b 100644
  std::int32_t absoluteTilt = 0;
  
  void clampAbsolute() {
-@@ -64,7 +67,7 @@ int Open(int userId, std::int32_t type, std::int32_t index, const MouseOpenParam
+@@ -64,7 +68,7 @@ int Open(int userId, std::int32_t type, std::int32_t index, const MouseOpenParam
      }
      if (opened) return MOUSE_ERROR_ALREADY_OPENED;
      opened = true;
@@ -21,7 +26,7 @@ index 8bcb0c4..186bf4b 100644
      head = 0;
      count = 0;
      MouseData initial{};
-@@ -79,7 +82,7 @@ int Close(std::int32_t handle) {
+@@ -79,7 +83,7 @@ int Close(std::int32_t handle) {
      if (!initialized) return MOUSE_ERROR_NOT_INITIALIZED;
      if (handle != MOUSE_HANDLE || !opened) return MOUSE_ERROR_INVALID_HANDLE;
      opened = false;
@@ -30,7 +35,7 @@ index 8bcb0c4..186bf4b 100644
      head = 0;
      count = 0;
      return MOUSE_OK;
-@@ -143,7 +146,7 @@ int ReadAbsolute(std::int32_t handle, MouseAbsoluteData* data, std::int32_t num)
+@@ -143,7 +147,7 @@ int ReadAbsolute(std::int32_t handle, MouseAbsoluteData* data, std::int32_t num)
      MouseAbsoluteData sample{};
      sample.timestamp = sceKernelGetProcessTime();
      sample.connected = connected ? 1u : 0u;
@@ -39,7 +44,7 @@ index 8bcb0c4..186bf4b 100644
      sample.x = static_cast<std::uint16_t>(absoluteX);
      sample.y = static_cast<std::uint16_t>(absoluteY);
      sample.wheel = std::exchange(absoluteWheel, 0);
-@@ -157,7 +160,7 @@ void Publish(const MouseInputEvent& event) {
+@@ -157,7 +161,7 @@ void Publish(const MouseInputEvent& event) {
      if (event.connectionChange) {
          if (connected == event.connected) return;
          connected = event.connected;
@@ -48,7 +53,7 @@ index 8bcb0c4..186bf4b 100644
      } else if (!connected) {
          return;
      }
-@@ -167,9 +170,12 @@ void Publish(const MouseInputEvent& event) {
+@@ -167,9 +171,12 @@ void Publish(const MouseInputEvent& event) {
      clampAbsolute();
      absoluteWheel += event.wheel;
      absoluteTilt += event.tilt;
@@ -63,3 +68,42 @@ index 8bcb0c4..186bf4b 100644
          else buttons &= ~event.button;
      }
      MouseData data{};
+@@ -183,4 +190,38 @@ void Publish(const MouseInputEvent& event) {
+     enqueue(data);
+ }
+ 
++void PublishDirect(std::int32_t targetX, std::int32_t targetY, std::uint32_t button, bool pressed) {
++    std::lock_guard lock(mouseMutex);
++    if (!opened) return;
++
++    targetX = std::clamp(targetX, 0, 1920);
++    targetY = std::clamp(targetY, 0, 1080);
++
++    typedef uintptr_t (*delta_fn)(void);
++    static delta_fn get_delta = nullptr;
++    if (!get_delta) get_delta = (delta_fn)dlsym(RTLD_DEFAULT, "Aps5GetAppElfDelta");
++
++    const uintptr_t delta = get_delta ? get_delta() : 0;
++    if (delta != 0) {
++        const int32_t curX = *(const int32_t*)(delta + 0x1ab21c0);
++        const int32_t curY = *(const int32_t*)(delta + 0x1ab21c4);
++        const int32_t deltaX = targetX - curX;
++        const int32_t deltaY = targetY - curY;
++        absoluteX = 960.0 + deltaX;
++        absoluteY = 540.0 + deltaY;
++    } else {
++        absoluteX = targetX;
++        absoluteY = targetY;
++    }
++
++    if (button != 0) {
++        if (pressed) {
++            buttons |= button;
++            pressedSinceRead |= button;
++        } else {
++            buttons &= ~button;
++        }
++    }
++}
++
+ }

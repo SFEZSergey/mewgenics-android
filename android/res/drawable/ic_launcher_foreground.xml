@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Картинка в безопасной зоне адаптивной иконки (66 из 108 dp): края не срезаются формой лаунчера. -->
+<inset xmlns:android="http://schemas.android.com/apk/res/android"
+    android:drawable="@drawable/pvz_icon"
+    android:inset="17%" />

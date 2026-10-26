@@ -1,0 +1,6 @@
+<resources>
+    <!-- И под вырезом камеры: без этого окно в альбомной ориентации уже панели на ширину выреза (2344 вместо 2400). -->
+    <style name="Theme.Replanted" parent="@android:style/Theme.Material.NoActionBar.Fullscreen">
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+    </style>
+</resources>

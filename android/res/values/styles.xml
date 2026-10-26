@@ -1,0 +1,4 @@
+<resources>
+    <!-- Окна во весь экран: размер окна игры задаёт размер её вывода (swapchain). -->
+    <style name="Theme.Replanted" parent="@android:style/Theme.Material.NoActionBar.Fullscreen" />
+</resources>

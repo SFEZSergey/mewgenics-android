@@ -424,7 +424,7 @@ index a7141d9..ae2b713 100644
  
  #define THRD_SUCCESS	0
 diff --git a/src/tools/aps5hot.c b/src/tools/aps5hot.c
-index 57fb4cc..4c05246 100644
+index 57fb4cc..3a09dff 100644
 --- a/src/tools/aps5hot.c
 +++ b/src/tools/aps5hot.c
 @@ -9,6 +9,10 @@
@@ -673,10 +673,25 @@ index 57fb4cc..4c05246 100644
  static uint64_t Fnv1a(const uint8_t* p, size_t size)
  {
      uint64_t h = 0xcbf29ce484222325ull;
-@@ -117,6 +333,28 @@ int Aps5HotPatchModule(const char* path, uintptr_t delta)
+@@ -86,6 +302,12 @@ static int WriteCode(uintptr_t addr, const void* bytes, size_t size)
+     return 1;
+ }
+ 
++__attribute__((visibility("default"))) uintptr_t aps5_app_elf_delta = 0;
++__attribute__((visibility("default"))) uintptr_t Aps5GetAppElfDelta(void)
++{
++    return aps5_app_elf_delta;
++}
++
+ // `path` is the module's file (only its name is matched), `delta` its load address.
+ int Aps5HotPatchModule(const char* path, uintptr_t delta)
+ {
+@@ -117,6 +339,30 @@ int Aps5HotPatchModule(const char* path, uintptr_t delta)
              strcat(names, hot[i].name);
          }
      }
++    if (!strcmp(file, "app.elf"))
++        aps5_app_elf_delta = delta;
 +    const char* sdlgpu = getenv("APS5_SDLGPU_VULKAN");
 +    if (!strcmp(file, "app.elf") && sdlgpu && *sdlgpu && strcmp(sdlgpu, "0")) {
 +        uintptr_t addr = delta + APS5_SDLGPU_CREATE_DEVICE;
@@ -704,7 +719,7 @@ index 57fb4cc..4c05246 100644
      return patched;
 diff --git a/src/tools/aps5hot_faudio.h b/src/tools/aps5hot_faudio.h
 new file mode 100644
-index 0000000..4a9e286
+index 0000000..c6f24d2
 --- /dev/null
 +++ b/src/tools/aps5hot_faudio.h
 @@ -0,0 +1,185 @@
@@ -947,7 +962,7 @@ index 4b5b6d0..aa4ffdf 100644
  	GO(pthread_attr_setaffinity_np, iFpLp_t) \
  	GO(pthread_getaffinity_np, iFpLp_t) \
 diff --git a/src/wrapped/generated/wrapper.c b/src/wrapped/generated/wrapper.c
-index f5bd3bd..90a8101 100644
+index f5bd3bd..543340d 100644
 --- a/src/wrapped/generated/wrapper.c
 +++ b/src/wrapped/generated/wrapper.c
 @@ -8669,8 +8669,12 @@ void iFEpvvppp(x64emu_t *emu, uintptr_t fcn) { iFEpppp_t fn = (iFEpppp_t)fcn; R_

@@ -1,0 +1,6 @@
+<resources>
+    <!-- always: под вырезом на любой стороне экрана (shortEdges на части прошивок не действует в альбомной ориентации). -->
+    <style name="Theme.Replanted" parent="@android:style/Theme.Material.NoActionBar.Fullscreen">
+        <item name="android:windowLayoutInDisplayCutoutMode">always</item>
+    </style>
+</resources>

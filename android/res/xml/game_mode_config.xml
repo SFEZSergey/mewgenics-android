@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Game Mode (Android 13+): the system and OEM game spaces treat the app as a game; their
+     interventions (render downscaling, FPS override) stay off, the game sets its own resolution and
+     frame limit. -->
+<game-mode-config xmlns:android="http://schemas.android.com/apk/res/android"
+    android:supportsBatteryGameMode="false"
+    android:supportsPerformanceGameMode="false"
+    android:allowGameDownscaling="false"
+    android:allowGameFpsOverride="false" />
