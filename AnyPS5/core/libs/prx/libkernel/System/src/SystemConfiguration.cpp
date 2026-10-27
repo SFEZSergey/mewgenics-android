@@ -60,15 +60,31 @@ std::int64_t APS5_VABI sysconf_nid_postfix(int name) {
 #endif
             break;
         case 121: { // _SC_PHYS_PAGES: report host physical capacity in guest pages
-#ifdef _WIN32
+#if defined(__ANDROID__) || defined(APS5_NATIVE_PORT)
+            // Native port: cap the reported physical memory so the game budgets
+            // itself for mobile.  Report at most 4 GiB worth of guest pages
+            // regardless of the actual device RAM.
+            constexpr std::uint64_t maxPhysBytes = 4096ULL * 1024 * 1024; // 4 GiB
+            {
+                const auto pages = ::sysconf(_SC_PHYS_PAGES);
+                const auto pageSize = ::sysconf(_SC_PAGESIZE);
+                if (pages > 0 && pageSize > 0) {
+                    std::uint64_t hostBytes = static_cast<std::uint64_t>(pages) * pageSize;
+                    if (hostBytes > maxPhysBytes) hostBytes = maxPhysBytes;
+                    result = hostBytes / PS5_PAGE_SIZE;
+                }
+            }
+#elif defined(_WIN32)
             MEMORYSTATUSEX memory{};
             memory.dwLength = sizeof(memory);
             if (GlobalMemoryStatusEx(&memory)) result = memory.ullTotalPhys / PS5_PAGE_SIZE;
 #else
-            const auto pages = ::sysconf(_SC_PHYS_PAGES);
-            const auto pageSize = ::sysconf(_SC_PAGESIZE);
-            if (pages > 0 && pageSize > 0)
-                result = static_cast<std::uint64_t>(pages) * pageSize / PS5_PAGE_SIZE;
+            {
+                const auto pages = ::sysconf(_SC_PHYS_PAGES);
+                const auto pageSize = ::sysconf(_SC_PAGESIZE);
+                if (pages > 0 && pageSize > 0)
+                    result = static_cast<std::uint64_t>(pages) * pageSize / PS5_PAGE_SIZE;
+            }
 #endif
             break;
         }

@@ -7,7 +7,15 @@
 
 #include "prx/libkernel/KernelErrors.hpp"
 
-static constexpr size_t DIRECT_MEMORY_SIZE = 13824ULL * 1024 * 1024;
+// Original PS5 value: 13824 MiB (13.5 GiB).
+// Android native port: capped to 4 GiB so the game budgets itself for mobile
+// devices (6-12 GB RAM).  The game's own allocator will use smaller pools when
+// it sees a smaller direct-memory region.
+#if defined(__ANDROID__) || defined(APS5_NATIVE_PORT)
+static constexpr size_t DIRECT_MEMORY_SIZE = 4096ULL * 1024 * 1024;  // 4 GiB
+#else
+static constexpr size_t DIRECT_MEMORY_SIZE = 13824ULL * 1024 * 1024; // 13.5 GiB (PS5)
+#endif
 static constexpr size_t PS5_PAGE_SIZE = 0x4000;
 
 int DirectMemoryAlloc(int64_t searchStart, int64_t searchEnd, size_t len, size_t alignment, int memoryType, int64_t* physOut);

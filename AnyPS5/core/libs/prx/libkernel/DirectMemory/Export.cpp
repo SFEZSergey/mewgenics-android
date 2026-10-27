@@ -33,7 +33,13 @@
 
 namespace {
 
-constexpr size_t FLEXIBLE_MEMORY_SIZE = 448ULL * 1024 * 1024;
+// Original PS5 value: 448 MiB.
+// Android native port: scaled down proportionally with DIRECT_MEMORY_SIZE.
+#if defined(__ANDROID__) || defined(APS5_NATIVE_PORT)
+constexpr size_t FLEXIBLE_MEMORY_SIZE = 128ULL * 1024 * 1024;  // 128 MiB
+#else
+constexpr size_t FLEXIBLE_MEMORY_SIZE = 448ULL * 1024 * 1024;  // 448 MiB (PS5)
+#endif
 
 constexpr int PRT_APERTURE_COUNT = 3;
 

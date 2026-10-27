@@ -9,6 +9,10 @@
 #include <mutex>
 #include <string>
 #include <vector>
+
+// Forward declaration for native runtime hook
+extern "C" void* GetNativeSymbol(const char* name);
+
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -160,6 +164,10 @@ void* APS5_VABI dlsym_nid_postfix(void* handle, const char* name) {
             }
         }
         for (const auto& module : search) if (auto* result = FindSymbol(*module, name)) return result;
+        
+        // Native Runtime Redirect Hook
+        if (auto* result = GetNativeSymbol(name)) return result;
+
 #ifndef _WIN32
         if (handle == nullptr || handle == reinterpret_cast<void*>(static_cast<std::intptr_t>(-2))) {
             if (auto* result = DefaultScopeSymbol(name)) return result;
