@@ -19,6 +19,11 @@ def update_apk(src_apk: Path, dst_apk: Path, shims_dir: Path, sdlgpu_so: Path):
         replacements["lib/arm64-v8a/libaps5sdlgpu.so"] = sdlgpu_so.read_bytes()
         print(f"  [+] Добавлен {sdlgpu_so.name} ({len(replacements['lib/arm64-v8a/libaps5sdlgpu.so'])} байт)")
 
+    classes_dex = src_apk.parent / "android" / "classes.dex"
+    if classes_dex.exists():
+        replacements["classes.dex"] = classes_dex.read_bytes()
+        print(f"  [+] Добавлен обновленный classes.dex ({len(replacements['classes.dex'])} байт)")
+
     for so_file in shims_dir.glob("*.so"):
         target_name = f"lib/arm64-v8a/{so_file.name}"
         replacements[target_name] = so_file.read_bytes()

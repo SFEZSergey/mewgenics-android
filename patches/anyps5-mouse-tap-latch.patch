@@ -95,8 +95,12 @@ index 8bcb0c4..428d5c2 100644
 +    }
 +
 +    if (delta != 0) {
-+        const int32_t curX = *(const int32_t*)(delta + 0x1ab21c0);
-+        const int32_t curY = *(const int32_t*)(delta + 0x1ab21c4);
++        int32_t curX = *(const int32_t*)(delta + 0x1ab61c0);
++        int32_t curY = *(const int32_t*)(delta + 0x1ab61c4);
++        if (curX < 0 || curX > 1920 || curY < 0 || curY > 1080) {
++            curX = 960;
++            curY = 540;
++        }
 +        const int32_t deltaX = targetX - curX;
 +        const int32_t deltaY = targetY - curY;
 +        absoluteX = 960.0 + deltaX;
