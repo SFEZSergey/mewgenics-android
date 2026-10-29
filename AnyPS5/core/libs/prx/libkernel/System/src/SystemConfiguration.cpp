@@ -64,7 +64,7 @@ std::int64_t APS5_VABI sysconf_nid_postfix(int name) {
             // Native port: cap the reported physical memory so the game budgets
             // itself for mobile.  Report at most 4 GiB worth of guest pages
             // regardless of the actual device RAM.
-            constexpr std::uint64_t maxPhysBytes = 4096ULL * 1024 * 1024; // 4 GiB
+            constexpr std::uint64_t maxPhysBytes = 2048ULL * 1024 * 1024; // 2 GiB для 4-6 ГБ устройств
             {
                 const auto pages = ::sysconf(_SC_PHYS_PAGES);
                 const auto pageSize = ::sysconf(_SC_PAGESIZE);

@@ -12,7 +12,8 @@
 // devices (6-12 GB RAM).  The game's own allocator will use smaller pools when
 // it sees a smaller direct-memory region.
 #if defined(__ANDROID__) || defined(APS5_NATIVE_PORT)
-static constexpr size_t DIRECT_MEMORY_SIZE = 4096ULL * 1024 * 1024;  // 4 GiB
+// Оптимизировано для устройств с 4-6 ГБ ОЗУ: 2048 MiB вместо 4-13.5 GiB
+static constexpr size_t DIRECT_MEMORY_SIZE = 2048ULL * 1024 * 1024;  // 2 GiB
 #else
 static constexpr size_t DIRECT_MEMORY_SIZE = 13824ULL * 1024 * 1024; // 13.5 GiB (PS5)
 #endif
