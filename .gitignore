@@ -15,3 +15,12 @@ __pycache__/
 *.box64
 /sesscap*
 sesscap.txt
+*.idsig
+*.log
+*.zip
+*.swf
+*.spv
+*.bin
+*test_runner*
+build-host/
+
