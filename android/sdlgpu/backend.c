@@ -13,6 +13,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <dlfcn.h>
 
 #define EXPORT __attribute__((visibility("default")))
 
@@ -204,17 +205,11 @@ static uint64_t acquired(bool ok, uint64_t commandBuffer, uint64_t window, uint6
 
 static uint64_t L_AcquireSwapchainTexture(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4)
 {
-    fprintf(stderr, "[sdlgpu] >> L_AcquireSwapchainTexture(cb=%p, win=%p, tex=%p)\n", (void*)a0, (void*)a1, (void*)a2);
-    uint64_t r = acquired(A_AcquireSwapchainTexture(a0, a1, a2, a3, a4) != 0, a0, a1, a2, a3, a4);
-    fprintf(stderr, "[sdlgpu] << L_AcquireSwapchainTexture -> %llu\n", (unsigned long long)r);
-    return r;
+    return acquired(A_AcquireSwapchainTexture(a0, a1, a2, a3, a4) != 0, a0, a1, a2, a3, a4);
 }
 static uint64_t L_WaitAndAcquireSwapchainTexture(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4)
 {
-    fprintf(stderr, "[sdlgpu] >> L_WaitAndAcquireSwapchainTexture(cb=%p, win=%p, tex=%p)\n", (void*)a0, (void*)a1, (void*)a2);
-    uint64_t r = acquired(A_WaitAndAcquireSwapchainTexture(a0, a1, a2, a3, a4) != 0, a0, a1, a2, a3, a4);
-    fprintf(stderr, "[sdlgpu] << L_WaitAndAcquireSwapchainTexture -> %llu\n", (unsigned long long)r);
-    return r;
+    return acquired(A_WaitAndAcquireSwapchainTexture(a0, a1, a2, a3, a4) != 0, a0, a1, a2, a3, a4);
 }
 
 // Before a command buffer holding a present is submitted (or dropped): the canvas goes into the
@@ -1211,5 +1206,21 @@ EXPORT SDL_GPUDevice *Aps5SdlGpu_CreateDevice(bool debugMode, bool preferLowPowe
     *kinds = slotKinds;
     *count = (int)sizeof(slotKinds);
     fprintf(stderr, "[sdlgpu] device ready: %d slots\n", *count);
+
+    void *glaiel = dlopen("libglaiel_native.so", RTLD_NOW);
+    if (glaiel) {
+        int (*init_fn)(const char*) = (int (*)(const char*))dlsym(glaiel, "glaiel_native_init");
+        int (*load_fn)(void) = (int (*)(void))dlsym(glaiel, "glaiel_native_load_data");
+        if (init_fn) {
+            init_fn(".");
+            if (load_fn) {
+                int r = load_fn();
+                fprintf(stderr, "[glaiel] native GlaielEngine ready (data load %d)\n", r);
+            }
+        }
+    } else {
+        fprintf(stderr, "[glaiel] dlopen libglaiel_native.so: %s\n", dlerror());
+    }
+
     return device;
 }
