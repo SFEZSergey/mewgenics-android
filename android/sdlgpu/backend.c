@@ -186,7 +186,7 @@ static uint64_t acquired(bool ok, uint64_t commandBuffer, uint64_t window, uint6
     if (!ok || !*out) return ok;
     SDL_GPUCommandBuffer *cb = (SDL_GPUCommandBuffer *)(uintptr_t)commandBuffer;
     Uint32 *w = (Uint32 *)(uintptr_t)width, *h = (Uint32 *)(uintptr_t)height;
-    SDL_GPURenderer *renderer = ((CommandBufferCommonHeader *)cb)->device->driverData;
+    SDL_GPURenderer *renderer = real.driverData;
     SDL_LockMutex(presentLock);
     SDL_GPUTexture *target = canvasFor(renderer, (SDL_Window *)(uintptr_t)window);
     for (int i = 0; target && i < (int)SDL_arraysize(pending); ++i) {
@@ -204,11 +204,17 @@ static uint64_t acquired(bool ok, uint64_t commandBuffer, uint64_t window, uint6
 
 static uint64_t L_AcquireSwapchainTexture(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4)
 {
-    return acquired(A_AcquireSwapchainTexture(a0, a1, a2, a3, a4) != 0, a0, a1, a2, a3, a4);
+    fprintf(stderr, "[sdlgpu] >> L_AcquireSwapchainTexture(cb=%p, win=%p, tex=%p)\n", (void*)a0, (void*)a1, (void*)a2);
+    uint64_t r = acquired(A_AcquireSwapchainTexture(a0, a1, a2, a3, a4) != 0, a0, a1, a2, a3, a4);
+    fprintf(stderr, "[sdlgpu] << L_AcquireSwapchainTexture -> %llu\n", (unsigned long long)r);
+    return r;
 }
 static uint64_t L_WaitAndAcquireSwapchainTexture(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4)
 {
-    return acquired(A_WaitAndAcquireSwapchainTexture(a0, a1, a2, a3, a4) != 0, a0, a1, a2, a3, a4);
+    fprintf(stderr, "[sdlgpu] >> L_WaitAndAcquireSwapchainTexture(cb=%p, win=%p, tex=%p)\n", (void*)a0, (void*)a1, (void*)a2);
+    uint64_t r = acquired(A_WaitAndAcquireSwapchainTexture(a0, a1, a2, a3, a4) != 0, a0, a1, a2, a3, a4);
+    fprintf(stderr, "[sdlgpu] << L_WaitAndAcquireSwapchainTexture -> %llu\n", (unsigned long long)r);
+    return r;
 }
 
 // Before a command buffer holding a present is submitted (or dropped): the canvas goes into the
@@ -302,7 +308,7 @@ static bool dumpWanted(void)
 // Records the canvas download into the frame's command buffer (before it is submitted).
 static bool recordDump(SDL_GPUCommandBuffer *cb)
 {
-    SDL_GPURenderer *renderer = ((CommandBufferCommonHeader *)cb)->device->driverData;
+    SDL_GPURenderer *renderer = real.driverData;
     if (!dumpBuffer) dumpBuffer = real.CreateTransferBuffer(renderer, SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD, canvasW * canvasH * 4u, "dump");
     if (!dumpBuffer) return false;
     real.BeginCopyPass(cb);
@@ -382,7 +388,7 @@ static void texDump(SDL_GPUCommandBuffer *cb)
     if (!cachedExists) { done = false; return; }
     if (done) return;
     done = true;
-    SDL_GPURenderer *renderer = ((CommandBufferCommonHeader *)cb)->device->driverData;
+    SDL_GPURenderer *renderer = real.driverData;
     Uint32 block = 1;
     const Uint32 bytes = blockBytes(atlasInfo.format, &block);
     if (!bytes) return;
@@ -418,7 +424,7 @@ static uint64_t submitFrame(uint64_t a0, uint64_t (*submit)(uint64_t))
     texDump((SDL_GPUCommandBuffer *)(uintptr_t)a0);
     dumpCounts();
     SDL_GPUCommandBuffer *cb = (SDL_GPUCommandBuffer *)(uintptr_t)a0;
-    SDL_GPURenderer *renderer = ((CommandBufferCommonHeader *)cb)->device->driverData;
+    SDL_GPURenderer *renderer = real.driverData;
     const bool presenting = finishPresent(a0, true);
     const bool dump = presenting && dumpWanted() && recordDump(cb);
     const uint64_t result = submit(a0);
@@ -588,7 +594,7 @@ static void uploadTexture(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3)
             const Uint32 rows = (layerRows + block - 1) / block;
             const Uint32 depth = region.d ? region.d : 1;
             const Uint32 size = rowBytes * rows * depth;
-            SDL_GPURenderer *renderer = ((CommandBufferCommonHeader *)cb)->device->driverData;
+            SDL_GPURenderer *renderer = real.driverData;
             const Uint8 *from = real.MapTransferBuffer(renderer, source.transfer_buffer, false);
             SDL_GPUTransferBuffer *aligned = real.CreateTransferBuffer(renderer, SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, size, "aligned upload");
             Uint8 *to = aligned ? real.MapTransferBuffer(renderer, aligned, false) : NULL;
@@ -649,8 +655,7 @@ static uint64_t L_UploadToTexture(uint64_t a0, uint64_t a1, uint64_t a2, uint64_
     uploadRealigned = NULL;
     uploadTexture(a0, a1, a2, a3);
     if (uploadRealigned) {
-        SDL_GPUCommandBuffer *cb = (SDL_GPUCommandBuffer *)(uintptr_t)a0;
-        real.ReleaseTransferBuffer(((CommandBufferCommonHeader *)cb)->device->driverData, uploadRealigned);
+        real.ReleaseTransferBuffer(real.driverData, uploadRealigned);
         uploadRealigned = NULL;
     }
     return 0;
@@ -803,7 +808,7 @@ static uint64_t bindSamplers(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
     if ((!rule && !forced) || (Uint32)a3 > 16) return bind(a0, a1, a2, a3);
     SDL_GPUTextureSamplerBinding bindings[16];
     memcpy(bindings, (const void *)(uintptr_t)a2, (Uint32)a3 * sizeof(*bindings));
-    SDL_GPURenderer *renderer = ((CommandBufferCommonHeader *)cb)->device->driverData;
+    SDL_GPURenderer *renderer = real.driverData;
     for (Uint32 i = 0; i < (Uint32)a3; ++i)
         if (forced || uploadedWithLevels(bindings[i].texture)) bindings[i].sampler = nearestOf(renderer, bindings[i].sampler);
     return bind(a0, a1, (uint64_t)(uintptr_t)bindings, a3);

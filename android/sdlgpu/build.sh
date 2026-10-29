@@ -5,7 +5,11 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 OUT="${1:-$HERE/libaps5sdlgpu.so}"
 SDL_COMMIT=2747162d9ab6fcb850991434eed9e109e543eebd
-PS5_ROOT="${PS5_ROOT:-$HOME/ps5-android}"
+PS5_ROOT="${PS5_ROOT:-/root/ps5-android}"
+NDK_BIN="/opt/android/android-ndk-r26d/toolchains/llvm/prebuilt/linux-x86_64/bin"
+if [ -d "$NDK_BIN" ]; then
+  PATH="$NDK_BIN:$PATH"
+fi
 SDL_SRC="${SDL_SRC:-$PS5_ROOT/src/sdl3-gpu-base/SDL-$SDL_COMMIT}"
 SDL2_INC="${SDL2_INC:-$PS5_ROOT/src/AnyPS5/3rdparty/SDL2/include}"
 [ -d "$SDL2_INC" ] || SDL2_INC="$HERE/../../AnyPS5/3rdparty/SDL2/include"

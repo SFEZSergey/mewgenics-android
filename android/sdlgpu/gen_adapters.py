@@ -38,6 +38,7 @@ for decl in body.split(';'):
     if name == 'SetBlendConstants':
         kinds.append(2)
         out.append('static uint64_t A_%s(uint64_t a0, float r, float g, float b, float a)\n{\n    if (countCalls) __atomic_fetch_add(&slotCalls[%d], 1, __ATOMIC_RELAXED);\n'
+                   '    fprintf(stderr, "[sdlgpu] >> SetBlendConstants\\n");\n'
                    '    const SDL_FColor color = {r, g, b, a};\n'
                    '    real.%s((SDL_GPUCommandBuffer *)(uintptr_t)a0, color);\n    return 0;\n}\n' % (name, len(names) - 1, name))
         continue
@@ -70,14 +71,19 @@ for decl in body.split(';'):
             call.append('(%s)(Uint32)%s' % (t, a))
     sig = ', '.join('uint64_t a%d' % i for i in range(len(split))) or 'void'
     invoke = 'real.%s(%s)' % (name, ', '.join(call))
-    if ret == 'void':
-        tail = '    %s;\n    return 0;\n' % invoke
+    guard = '    if (!real.%s) { fprintf(stderr, "[sdlgpu] unbridged slot %s called!\\n"); return 0; }\n' % (name, name)
+    log_enter = '    static int enter_%s; if (enter_%s++ < 5) fprintf(stderr, "[sdlgpu] >> %s\\n");\n' % (name, name, name)
+    log_exit = '    if (enter_%s <= 5) fprintf(stderr, "[sdlgpu] << %s\\n");\n' % (name, name)
+    if name == 'AcquireCommandBuffer':
+        tail = guard + log_enter + '    SDL_GPUCommandBuffer *cb = real.AcquireCommandBuffer(%s);\n    if (cb) ((CommandBufferCommonHeader *)cb)->device = (SDL_GPUDevice *)&real;\n' % ', '.join(call) + log_exit + '    return (uint64_t)(uintptr_t)cb;\n'
+    elif ret == 'void':
+        tail = guard + log_enter + '    %s;\n' % invoke + log_exit + '    return 0;\n'
     elif POINTER.search(ret):
-        tail = '    return (uint64_t)(uintptr_t)%s;\n' % invoke
+        tail = guard + log_enter + '    uint64_t res = (uint64_t)(uintptr_t)%s;\n' % invoke + log_exit + '    return res;\n'
     elif ret == 'bool':
-        tail = '    return %s ? 1 : 0;\n' % invoke
+        tail = guard + log_enter + '    uint64_t res = %s ? 1 : 0;\n' % invoke + log_exit + '    return res;\n'
     else:
-        tail = '    return (uint64_t)%s;\n' % invoke
+        tail = guard + log_enter + '    uint64_t res = (uint64_t)%s;\n' % invoke + log_exit + '    return res;\n'
     out.append('static uint64_t A_%s(%s)\n{\n    if (countCalls) __atomic_fetch_add(&slotCalls[%d], 1, __ATOMIC_RELAXED);\n%s%s}\n' % (name, sig, len(names) - 1, ''.join(pre), tail))
 
 with open(sys.argv[2], 'w') as f:
