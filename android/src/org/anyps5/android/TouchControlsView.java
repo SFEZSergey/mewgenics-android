@@ -340,7 +340,7 @@ public final class TouchControlsView extends View {
             }
             case MotionEvent.ACTION_CANCEL:
                 releaseAll();
-                removeCallbacks(dragHoldRunnable);
+                removeCallbacks(longPressRunnable);
                 if (mousePointer >= 0) {
                     final int gx = toGameX(mouseStartX), gy = toGameY(mouseStartY);
                     direct(gx, gy, 1, false);
@@ -397,15 +397,17 @@ public final class TouchControlsView extends View {
         return Math.max(0, Math.min(1080, Math.round(gy)));
     }
 
-    private final Runnable dragHoldRunnable = new Runnable() {
+    private final Runnable longPressRunnable = new Runnable() {
         @Override public void run() {
             if (mousePointer >= 0 && !mouseMoved && !mouseSecondFinger) {
-                mouseDragging = true;
+                mouseSecondFinger = true;
                 try {
                     performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS);
                 } catch (Throwable ignored) {}
                 final int gx = toGameX(mouseStartX), gy = toGameY(mouseStartY);
-                direct(gx, gy, 1, true);
+                direct(gx, gy, 1, false);
+                direct(gx, gy, 2, true);
+                direct(gx, gy, 2, false);
             }
         }
     };
@@ -416,12 +418,9 @@ public final class TouchControlsView extends View {
             if (mouseExtraPointer >= 0) return false;
             mouseExtraPointer = id;
             mouseSecondFinger = true;
-            removeCallbacks(dragHoldRunnable);
+            removeCallbacks(longPressRunnable);
             final int gx = toGameX(mouseStartX), gy = toGameY(mouseStartY);
-            if (mouseDragging) {
-                direct(gx, gy, 1, false);
-                mouseDragging = false;
-            }
+            direct(gx, gy, 1, false);
             direct(gx, gy, 2, true);
             direct(gx, gy, 2, false);
             try {
@@ -435,8 +434,8 @@ public final class TouchControlsView extends View {
         mouseDownTime = event.getEventTime();
         mouseMoved = mouseSecondFinger = mouseDragging = false;
         final int gx = toGameX(mouseStartX), gy = toGameY(mouseStartY);
-        direct(gx, gy, 0, false);
-        postDelayed(dragHoldRunnable, 350L);
+        direct(gx, gy, 1, true);
+        postDelayed(longPressRunnable, longPressMs);
         return true;
     }
 
@@ -447,35 +446,24 @@ public final class TouchControlsView extends View {
         final float slop = 10f * getResources().getDisplayMetrics().density;
         if (!mouseMoved && Math.hypot(x - mouseStartX, y - mouseStartY) > slop) {
             mouseMoved = true;
-            removeCallbacks(dragHoldRunnable);
+            removeCallbacks(longPressRunnable);
         }
         if (!mouseSecondFinger) {
             final int gx = toGameX(x), gy = toGameY(y);
-            if (mouseDragging) {
-                direct(gx, gy, 1, true);
-            } else {
-                direct(gx, gy, 0, false);
-            }
+            direct(gx, gy, 1, true);
         }
         return true;
     }
 
     private boolean mouseUp(MotionEvent event, int id) {
         if (id == mouseExtraPointer) { mouseExtraPointer = -1; return true; }
-        removeCallbacks(dragHoldRunnable);
+        removeCallbacks(longPressRunnable);
         if (!mouseSecondFinger) {
             final int index = event.findPointerIndex(mousePointer);
             final float x = index >= 0 ? event.getX(index) : mouseStartX;
             final float y = index >= 0 ? event.getY(index) : mouseStartY;
             final int gx = toGameX(x), gy = toGameY(y);
-            if (mouseDragging) {
-                direct(gx, gy, 1, false);
-            } else if (!mouseMoved && (event.getEventTime() - mouseDownTime) < 400L) {
-                direct(gx, gy, 1, true);
-                direct(gx, gy, 1, false);
-            } else {
-                direct(gx, gy, 0, false);
-            }
+            direct(gx, gy, 1, false);
         }
         mousePointer = -1;
         mouseMoved = mouseSecondFinger = mouseDragging = false;

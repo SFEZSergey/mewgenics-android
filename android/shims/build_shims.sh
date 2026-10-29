@@ -26,7 +26,6 @@ compile "$HERE/src/MinimalRandom.cpp" "libSceRandom.so"
 compile "$HERE/src/MinimalUserService.cpp" "libSceUserService.so"
 compile "$HERE/src/MinimalSystemService.cpp" "libSceSystemService.so"
 compile "$HERE/src/MinimalRtc.cpp" "libSceRtc.so"
-compile "$HERE/src/NativeMouse.cpp" "libSceMouse.so"
 
 echo "=== Готово! Список собранных нативных библиотек: ==="
 ls -lh "$HERE"/*.so
