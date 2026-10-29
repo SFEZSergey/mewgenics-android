@@ -36,8 +36,9 @@ public final class MainActivity extends Activity {
     private static final int SAVE_LOGS = 12;
     private static final int PICK_GAME_ZIP = 13;
     private Button driverButton, gameLanguageButton, uiLanguageButton;
-    private TextView status;
+    private TextView status, title, subtitle;
     private Button start;
+    private android.widget.ImageView icon;
 
     static { System.loadLibrary("anyps5_android"); }
     private static native String nativeGetStatus();
@@ -53,23 +54,18 @@ public final class MainActivity extends Activity {
         }
         hideSystemBars();
         migrateLibrary();
+        ensureActiveGame();
         // Хаб: слева иконка выбранной игры, справа её название, статус, «Играть», библиотека игр, настройки.
         final float dp = getResources().getDisplayMetrics().density;
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.HORIZONTAL); root.setGravity(Gravity.CENTER); root.setPadding((int)(24*dp), (int)(12*dp), (int)(24*dp), (int)(12*dp));
         root.setBackground(new android.graphics.drawable.GradientDrawable(android.graphics.drawable.GradientDrawable.Orientation.TL_BR, new int[] {0xff1e1a29, 0xff100d18}));
-        android.widget.ImageView icon = new android.widget.ImageView(this);
-        android.graphics.Bitmap gameIcon = null;
-        for (String path : new String[] {"sce_sys/icon0.png", "app0/sce_sys/icon0.png"}) {
-            File file = new File(activeGame(), path);
-            if (gameIcon == null && file.isFile()) gameIcon = android.graphics.BitmapFactory.decodeFile(file.getAbsolutePath());
-        }
-        if (gameIcon != null) icon.setImageBitmap(gameIcon); else icon.setImageDrawable(getApplicationInfo().loadIcon(getPackageManager()));
+        icon = new android.widget.ImageView(this);
         LinearLayout.LayoutParams iconSize = new LinearLayout.LayoutParams((int)(112*dp), (int)(112*dp)); iconSize.rightMargin = (int)(24*dp);
         root.addView(icon, iconSize);
         LinearLayout panel = new LinearLayout(this); panel.setOrientation(LinearLayout.VERTICAL); panel.setGravity(Gravity.CENTER_VERTICAL);
-        TextView title = new TextView(this); String gameName = readTitleName(activeGame()); title.setText(gameName != null ? gameName : (activeId() != null ? activeId() : "Mewgenics")); title.setTextColor(0xfff8f5ee); title.setTextSize(28); title.setTypeface(android.graphics.Typeface.DEFAULT_BOLD); panel.addView(title);
-        TextView subtitle = new TextView(this); subtitle.setText((activeId() != null ? activeId() + " · " : "") + t("PS5 · AnyPS5 + box64 + Turnip", "PS5 · AnyPS5 + box64 + Turnip")); subtitle.setTextColor(0xffc5b4d6); subtitle.setTextSize(12); panel.addView(subtitle);
+        title = new TextView(this); title.setTextColor(0xfff8f5ee); title.setTextSize(28); title.setTypeface(android.graphics.Typeface.DEFAULT_BOLD); panel.addView(title);
+        subtitle = new TextView(this); subtitle.setTextColor(0xffc5b4d6); subtitle.setTextSize(12); panel.addView(subtitle);
         status = new TextView(this); status.setTextColor(0xffe2d9ec); status.setTextSize(13); status.setPadding(0, (int)(8*dp), 0, (int)(8*dp)); panel.addView(status);
         LinearLayout actions = new LinearLayout(this); actions.setOrientation(LinearLayout.HORIZONTAL); actions.setGravity(Gravity.CENTER_VERTICAL);
         start = new Button(this); start.setText(t("Играть", "Play")); styleButton(start, 0xffd32f2f, 18);
@@ -87,9 +83,8 @@ public final class MainActivity extends Activity {
         homeView = root;
         settingsView = buildSettings();
         keepOutOfCutout(homeView); keepOutOfCutout(settingsView);
-        loadBackground();
+        refreshGameDisplay();
         showSettings(state != null && state.getBoolean("settings", false));
-        showStatus();
         // Тестовый прогон (tools/autopilot.sh): лаунчер поверх экрана блокировки сам обновляет рантайм
         // и запускает игру, как кнопка «Играть».
         final boolean autopilot = new File(new File(getFilesDir(), "game"), "autopilot.txt").isFile();
@@ -654,13 +649,76 @@ public final class MainActivity extends Activity {
     }
 
     private String selectedTree() { return getPreferences(MODE_PRIVATE).getString("game_tree", null); }
+
+    private void refreshGameDisplay() {
+        File game = activeGame();
+        String gameName = readTitleName(game);
+        String actId = activeId();
+        if (title != null) title.setText(gameName != null ? gameName : (actId != null ? actId : "Mewgenics"));
+        if (subtitle != null) subtitle.setText((actId != null ? actId + " · " : "") + t("PS5 · AnyPS5 + box64 + Turnip", "PS5 · AnyPS5 + box64 + Turnip"));
+        if (icon != null) {
+            android.graphics.Bitmap gameIcon = null;
+            for (String path : new String[] {"sce_sys/icon0.png", "app0/sce_sys/icon0.png"}) {
+                File file = new File(game, path);
+                if (gameIcon == null && file.isFile()) gameIcon = android.graphics.BitmapFactory.decodeFile(file.getAbsolutePath());
+            }
+            if (gameIcon != null) icon.setImageBitmap(gameIcon);
+            else icon.setImageDrawable(getApplicationInfo().loadIcon(getPackageManager()));
+        }
+        showStatus();
+        loadBackground();
+    }
+
+    private void ensureActiveGame() {
+        File current = activeGame();
+        if (current.exists() && (new File(current, "app.elf").isFile() || new File(current, "eboot.bin").isFile())) {
+            return;
+        }
+
+        // 1. Поиск игры прямо в корне файлов лаунчера files/
+        File rootElf = new File(getFilesDir(), "app.elf");
+        File rootEboot = new File(getFilesDir(), "eboot.bin");
+        if (rootElf.isFile() || rootEboot.isFile()) {
+            String rootId = readTitleId(getFilesDir());
+            if (rootId == null) rootId = "PPSA37318";
+            gamesDir().mkdirs();
+            File target = new File(gamesDir(), rootId);
+            if (!target.exists()) target.mkdirs();
+            File[] files = getFilesDir().listFiles();
+            if (files != null) {
+                for (File f : files) {
+                    String name = f.getName();
+                    if ("games".equals(name) || "game".equals(name) || ".cache".equals(name) || "drivers".equals(name) || "launcher.env".equals(name)) continue;
+                    File dest = new File(target, name);
+                    if (!dest.exists()) f.renameTo(dest);
+                }
+            }
+            try { activate(rootId); return; } catch (Exception ignored) {}
+        }
+
+        // 2. Поиск в каталоге библиотек игр games/
+        java.util.List<File> list = games();
+        if (!list.isEmpty()) {
+            String toActivate = list.get(0).getName();
+            for (File g : list) {
+                if ("PPSA37318".equals(g.getName()) || new File(g, "app.elf").isFile()) {
+                    toActivate = g.getName();
+                    break;
+                }
+            }
+            try {
+                activate(toActivate);
+            } catch (Exception ignored) {}
+        }
+    }
+
     private void showStatus() {
         File gameDir = activeGame();
         if (new File(gameDir, "app.elf").isFile() && new File(gameDir, "libs").isDirectory()) {
             status.setText(t("Игра готова", "Game is ready") + "\n" + runtimeStatus());
             start.setText(t("Играть", "Play")); start.setEnabled(true); return;
         }
-        if (findEbootDirect(gameDir) != null || new File(gameDir, "eboot.bin").isFile()) {
+        if (findExecutableOrEboot(gameDir) != null) {
             normalizeEbootName(gameDir);
             status.setText(t("Дамп скопирован, подготовка не закончена", "The dump is copied, preparation is not finished") + "\n" + runtimeStatus());
             start.setText(t("Продолжить импорт", "Continue the import")); start.setEnabled(true); return;
@@ -708,7 +766,20 @@ public final class MainActivity extends Activity {
     }
     private void activate(String id) throws Exception {
         File link = activeGame();
-        if (Files.exists(link.toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(link.toPath())) throw new Exception("files/game не является ссылкой");
+        if (Files.exists(link.toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(link.toPath())) {
+            if (link.isDirectory()) {
+                String oldId = readTitleId(link);
+                if (oldId == null) oldId = id != null ? id : "PPSA37318";
+                File target = new File(gamesDir(), oldId);
+                if (!target.exists()) {
+                    target.mkdirs();
+                    File[] sub = link.listFiles();
+                    if (sub != null) for (File f : sub) f.renameTo(new File(target, f.getName()));
+                }
+                clearDirectory(link);
+            }
+            link.delete();
+        }
         Files.deleteIfExists(link.toPath());
         if (id == null) return;
         Os.symlink("games/" + id, link.getAbsolutePath());
@@ -738,11 +809,16 @@ public final class MainActivity extends Activity {
         super.onRestart();
         if (refreshOnReturn) { refreshOnReturn = false; recreate(); }
     }
+    @Override protected void onResume() {
+        super.onResume();
+        ensureActiveGame();
+        refreshGameDisplay();
+    }
     private void showLibrary() {
         final java.util.List<File> list = games();
         final String active = activeId();
         AlertDialog.Builder dialog = new AlertDialog.Builder(this).setTitle(t("Игры", "Games"));
-        if (list.isEmpty()) dialog.setMessage(t("Игр пока нет. Добавьте расшифрованный дамп игры PS5 — папку, где лежит eboot.bin.", "No games yet. Add a decrypted PS5 game dump: the folder with eboot.bin."));
+        if (list.isEmpty()) dialog.setMessage(t("Игр пока нет. Добавьте расшифрованный дамп игры PS5 — папку, где лежит eboot.bin или app.elf.", "No games yet. Add a decrypted PS5 game dump: the folder with eboot.bin or app.elf."));
         else {
             String[] labels = new String[list.size()];
             for (int i = 0; i < labels.length; i++) {
@@ -964,8 +1040,8 @@ public final class MainActivity extends Activity {
     // fresh — добавить игру из выбранной папки дампа (game_tree); иначе запустить выбранную или доделать её импорт.
     private void importAndStart(final boolean fresh) {
         final String value = selectedTree();
-        final File game = new File(getFilesDir(), "game");
-        if (new File(game, "app.elf").isFile() && new File(game, "libs").isDirectory() && (findEbootDirect(game) != null || new File(game, "eboot.bin").isFile()) && (hasUnlinkedGameModules(game) || staleRelinkLayout(game))) {
+        final File game = activeGame();
+        if (new File(game, "app.elf").isFile() && new File(game, "libs").isDirectory() && (findExecutableOrEboot(game) != null) && (hasUnlinkedGameModules(game) || staleRelinkLayout(game))) {
             normalizeEbootName(game);
             // app.elf собран без модулей игры из Media или по старой раскладке: перелинковка заново из eboot.bin.
             new File(game, "app.elf").delete();
@@ -991,7 +1067,7 @@ public final class MainActivity extends Activity {
             }}).start();
             return;
         }
-        final boolean dumpAlreadyPresent = !fresh && (findEbootDirect(game) != null || new File(game, "eboot.bin").isFile());
+        final boolean dumpAlreadyPresent = !fresh && (findExecutableOrEboot(game) != null);
         if (!dumpAlreadyPresent && (!fresh || value == null)) return;
         start.setEnabled(false);
         status.setText(dumpAlreadyPresent ? t("Дамп найден в папке игры; использую имеющиеся файлы…", "Dump found in the game folder; using the existing files…") : t("Подготовка к копированию…", "Preparing to copy…"));
@@ -1006,7 +1082,7 @@ public final class MainActivity extends Activity {
                     final CopyProgress p = new CopyProgress();
                     if (directSource != null && directSource.isDirectory() && directSource.canRead()) {
                         File dumpDir = new File(directSource, "dump");
-                        File effective = (dumpDir.isDirectory() && findEbootDirect(directSource) == null && !new File(directSource, "eboot.bin").isFile()) ? dumpDir : directSource;
+                        File effective = (dumpDir.isDirectory() && findExecutableOrEboot(directSource) == null) ? dumpDir : directSource;
                         statusOnUi(t("Подсчитываю файлы…", "Scanning files…"));
                         countDirect(effective, p);
                         statusOnUi(t("Копирование напрямую (Direct I/O)…", "Copying via Direct I/O…"));
@@ -1017,9 +1093,9 @@ public final class MainActivity extends Activity {
                     }
                     updateCopyStatus(p, true);
                     findAndFlattenDumpRoot(staging);
-                    if (findEbootDirect(staging) == null && !new File(staging, "eboot.bin").isFile()) {
+                    if (findExecutableOrEboot(staging) == null) {
                         clearDirectory(staging);
-                        throw new Exception(t("В выбранной папке не найден eboot.bin. Выберите сам каталог дампа.", "No eboot.bin in the chosen folder. Pick the dump folder itself."));
+                        throw new Exception(t("В выбранной папке не найден eboot.bin или app.elf. Выберите сам каталог дампа.", "No eboot.bin or app.elf in the chosen folder. Pick the dump folder itself."));
                     }
                     normalizeEbootName(staging);
                     String id = readTitleId(staging);
@@ -1032,8 +1108,10 @@ public final class MainActivity extends Activity {
                     clearDirectory(target);
                     if (!staging.renameTo(target)) throw new Exception("Не удалось перенести игру в games/" + id);
                     activate(id);
+                    // Шаг 1: Патчинг сразу после копирования дампа
+                    patchGameElf(target);
                 }
-                setupAndStartGame(game, fresh);
+                setupAndStartGame(activeGame(), fresh);
             } catch (final Throwable e) {
                 runOnUiThread(new Runnable() { @Override public void run() {
                     status.setText(t("Импорт не удался:\n", "Import failed:\n") + e.getMessage()); start.setEnabled(true);
@@ -1045,8 +1123,15 @@ public final class MainActivity extends Activity {
     private void setupAndStartGame(File game, final boolean fresh) throws Exception {
         normalizeEbootName(game);
         File self = new File(game, "eboot.bin");
-        if (!self.isFile()) throw new Exception(t("В выбранной папке не найден eboot.bin. Выберите сам каталог дампа.", "No eboot.bin in the chosen folder. Pick the dump folder itself."));
         File executable = new File(game, "app.elf");
+        if (!executable.isFile() && !self.isFile()) throw new Exception(t("В выбранной папке не найден eboot.bin или app.elf. Выберите сам каталог дампа.", "No eboot.bin or app.elf in the chosen folder. Pick the dump folder itself."));
+
+        // Шаг 1: Патчинг до релинка (если app.elf уже в наличии)
+        if (executable.isFile()) {
+            patchGameElf(game);
+        }
+
+        // Шаг 2: Релинк (если app.elf отсутствует)
         if (!executable.isFile()) {
             statusOnUi(t("Извлекаю ELF из eboot.bin…", "Extracting the ELF from eboot.bin…"));
             extractSelf(self, new File(game, "eboot.elf"));
@@ -1062,6 +1147,8 @@ public final class MainActivity extends Activity {
         copyPackagedRuntime("runtime/prx", new File(game, "libs"));
         linkGuestPrxLibraries(game);
         copyPackagedRuntime("runtime/x64lib", new File(game, "x64lib"));
+
+        // Шаг 3: Патчинг после релинка
         postRelinkGame(game);
         Files.write(new File(game, ".runtime-stamp").toPath(), Long.toString(getPackageManager().getPackageInfo(getPackageName(), 0).lastUpdateTime).getBytes());
         runOnUiThread(new Runnable() { @Override public void run() {
@@ -1491,6 +1578,18 @@ public final class MainActivity extends Activity {
         return null;
     }
 
+    // Проверка наличия исполняемого файла игры (app.elf, eboot.bin или eboot.elf)
+    private static File findExecutableOrEboot(File dir) {
+        if (dir == null || !dir.isDirectory()) return null;
+        File elf = new File(dir, "app.elf");
+        if (elf.isFile()) return elf;
+        File eboot = findEbootDirect(dir);
+        if (eboot != null) return eboot;
+        File ebootElf = new File(dir, "eboot.elf");
+        if (ebootElf.isFile()) return ebootElf;
+        return null;
+    }
+
     // Рекурсивный поиск eboot.bin / EBOOT.BIN на глубину до maxDepth
     private static File findEbootRecursive(File dir, int maxDepth) {
         if (dir == null || !dir.isDirectory() || maxDepth < 0) return null;
@@ -1563,19 +1662,16 @@ public final class MainActivity extends Activity {
     }
 
     private static void findAndFlattenDumpRoot(File staging) {
-        File eboot = findEbootRecursive(staging, 4);
-        if (eboot == null) {
-            for (String altName : new String[] {"eboot.elf", "app.elf"}) {
+        File exec = findEbootRecursive(staging, 4);
+        if (exec == null) {
+            for (String altName : new String[] {"app.elf", "eboot.elf"}) {
                 File alt = findFileRecursive(staging, altName, 4);
-                if (alt != null) {
-                    File target = new File(alt.getParentFile(), "eboot.bin");
-                    try { Files.copy(alt.toPath(), target.toPath()); eboot = target; break; } catch (Exception ignored) {}
-                }
+                if (alt != null) { exec = alt; break; }
             }
         }
-        if (eboot == null) return;
+        if (exec == null) return;
 
-        File dumpFolder = eboot.getParentFile();
+        File dumpFolder = exec.getParentFile();
         if (dumpFolder != null && dumpFolder.getName().equalsIgnoreCase("app0") && !dumpFolder.equals(staging)) {
             File parent = dumpFolder.getParentFile();
             moveContents(dumpFolder, parent);
@@ -1634,9 +1730,9 @@ public final class MainActivity extends Activity {
                 }
                 updateCopyStatus(p, true);
                 findAndFlattenDumpRoot(staging);
-                if (findEbootDirect(staging) == null && !new File(staging, "eboot.bin").isFile()) {
+                if (findExecutableOrEboot(staging) == null) {
                     clearDirectory(staging);
-                    throw new Exception(t("В архиве не найден eboot.bin. Убедитесь, что внутри лежит дамп игры.", "No eboot.bin in the archive. Make sure it contains the game dump."));
+                    throw new Exception(t("В архиве не найден eboot.bin или app.elf. Убедитесь, что внутри лежит дамп игры.", "No eboot.bin or app.elf in the archive. Make sure it contains the game dump."));
                 }
                 normalizeEbootName(staging);
                 String id = readTitleId(staging);
@@ -1649,6 +1745,8 @@ public final class MainActivity extends Activity {
                 clearDirectory(target);
                 if (!staging.renameTo(target)) throw new Exception("Не удалось перенести игру в games/" + id);
                 activate(id);
+                // Шаг 1: Патчинг сразу после копирования дампа
+                patchGameElf(target);
                 setupAndStartGame(activeGame(), true);
             } catch (final Throwable e) {
                 runOnUiThread(new Runnable() { @Override public void run() {
@@ -1819,12 +1917,21 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private void patchGameElf(File game) {
+        if (game == null) return;
+        String id = readTitleId(game);
+        if (id == null) id = game.getName();
+        File elf = new File(game, "app.elf");
+        if (elf.isFile() && ("PPSA37318".equals(id) || elf.length() > 30000000)) {
+            patchMewgenicsElf(elf);
+        }
+    }
+
     private void postRelinkGame(File game) {
         String id = readTitleId(game);
         if (id == null) id = game.getName();
-        if ("PPSA37318".equals(id)) {
-            patchMewgenicsElf(new File(game, "app.elf"));
-        }
+        // Шаг 3: Патчинг после релинка
+        patchGameElf(game);
         extractGameShaders(game, id);
         ensureGameEnv(game, id);
     }
