@@ -25,7 +25,7 @@ echo "=== 4. Сборка DEX (d8) ==="
 java -cp "$R8_JAR" com.android.tools.r8.D8 --lib "$PLATFORM_JAR" --min-api 26 --output "$WORKDIR" "$WORKDIR/app.jar"
 ls -lh "$WORKDIR/classes.dex"
 
-echo "=== 5. Замена classes.dex и libaps5sdlgpu.so в APK ==="
+echo "=== 5. Замена classes.dex, libaps5sdlgpu.so и shims в APK ==="
 python3 - << 'PYEOF'
 import zipfile
 from pathlib import Path
@@ -35,6 +35,13 @@ unsigned = Path("/tmp/mewgenics_build/unsigned.apk")
 dex = Path("/tmp/mewgenics_build/classes.dex").read_bytes()
 sdlgpu_path = Path("/mnt/c/Mewgenics/android/sdlgpu/libaps5sdlgpu.so")
 sdlgpu = sdlgpu_path.read_bytes() if sdlgpu_path.exists() else None
+shims_dir = Path("/mnt/c/Mewgenics/android/shims")
+
+replacements = {}
+if sdlgpu is not None:
+    replacements["lib/arm64-v8a/libaps5sdlgpu.so"] = sdlgpu
+for so_file in shims_dir.glob("*.so"):
+    replacements[f"lib/arm64-v8a/{so_file.name}"] = so_file.read_bytes()
 
 with zipfile.ZipFile(src, "r") as zin, zipfile.ZipFile(unsigned, "w", compression=zipfile.ZIP_DEFLATED) as zout:
     for item in zin.infolist():
@@ -42,11 +49,15 @@ with zipfile.ZipFile(src, "r") as zin, zipfile.ZipFile(unsigned, "w", compressio
             continue
         if item.filename == "classes.dex":
             zout.writestr(item, dex)
-        elif item.filename == "lib/arm64-v8a/libaps5sdlgpu.so" and sdlgpu is not None:
-            zout.writestr(item, sdlgpu)
-            print("[+] Replaced lib/arm64-v8a/libaps5sdlgpu.so")
+        elif item.filename in replacements:
+            zout.writestr(item, replacements.pop(item.filename))
+            print(f"[+] Replaced {item.filename}")
         else:
             zout.writestr(item, zin.read(item.filename))
+
+    for target_name, data in replacements.items():
+        zout.writestr(target_name, data)
+        print(f"[+] Added new {target_name}")
 
 print("[+] Replaced classes.dex")
 PYEOF

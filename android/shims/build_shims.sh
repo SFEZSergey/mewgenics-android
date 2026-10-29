@@ -13,11 +13,12 @@ echo "=== Сборка нативных ARM64 shims (замена эмулиру
 compile() {
     local src="$1"
     local out="$HERE/$2"
-    echo "  [+] Сборка $2 ..."
-    $CXX "$src" -o "$out"
+    shift 2
+    echo "  [+] Сборка $out ..."
+    $CXX "$src" -o "$out" "$@"
 }
 
-compile "$HERE/../../AnyPS5/core/libs/prx/libSceAudioOut/src/MinimalAudioOut.cpp" "libSceAudioOut.so"
+compile "$HERE/src/AAudioAudioOut.cpp" "libSceAudioOut.so" -laaudio
 compile "$HERE/../../AnyPS5/core/libs/prx/libSceVideoOut/src/MinimalVideoOut.cpp" "libSceVideoOut.so"
 compile "$HERE/../../AnyPS5/core/libs/prx/libSceSysmodule/src/MinimalSysmodule.cpp" "libSceSysmodule.so"
 compile "$HERE/src/MinimalCommonDialog.cpp" "libSceCommonDialog.so"

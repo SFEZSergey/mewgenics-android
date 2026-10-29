@@ -30,10 +30,7 @@ static VkResult SafeGetPhysicalDeviceSurfaceFormatsKHR(
     (void)physicalDevice; (void)surface;
     static const VkSurfaceFormatKHR formats[] = {
         { VK_FORMAT_R8G8B8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR },
-        { VK_FORMAT_R8G8B8A8_SRGB, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR },
-        { VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR },
-        { VK_FORMAT_B8G8R8A8_SRGB, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR },
-        { VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR }
+        { VK_FORMAT_R8G8B8A8_SRGB, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR }
     };
     const uint32_t count = (uint32_t)(sizeof(formats) / sizeof(formats[0]));
     if (!pSurfaceFormats) {
@@ -75,6 +72,9 @@ s = s.replace(q, safe_funcs + '\n' + q, 1)
 # Replace crashing Turnip Mesa WSI calls with safe implementations
 s = s.replace('renderer->vkGetPhysicalDeviceSurfaceFormatsKHR', 'SafeGetPhysicalDeviceSurfaceFormatsKHR')
 s = s.replace('renderer->vkGetPhysicalDeviceSurfacePresentModesKHR', 'SafeGetPhysicalDeviceSurfacePresentModesKHR')
+
+# Force FIFO (VSync) present mode on swapchain
+s = s.replace('swapchainCreateInfo.presentMode = SDLToVK_PresentMode[windowData->presentMode];', 'swapchainCreateInfo.presentMode = VK_PRESENT_MODE_FIFO_KHR;')
 
 # Instrument CreateSwapchain & ClaimWindow
 claim_old = 'Uint32 createSwapchainResult = VULKAN_INTERNAL_CreateSwapchain(renderer, windowData);'

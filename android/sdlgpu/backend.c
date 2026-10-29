@@ -419,6 +419,23 @@ static void texDump(SDL_GPUCommandBuffer *cb)
     }
 }
 
+static struct timespec lastPresentTime;
+static void limitFps(void)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    if (lastPresentTime.tv_sec != 0) {
+        uint64_t diffNs = (uint64_t)(now.tv_sec - lastPresentTime.tv_sec) * 1000000000ULL + (uint64_t)(now.tv_nsec - lastPresentTime.tv_nsec);
+        const uint64_t targetNs = 16666667ULL; // 60 FPS (~16.67 ms)
+        if (diffNs < targetNs) {
+            uint64_t waitNs = targetNs - diffNs;
+            struct timespec req = {(time_t)(waitNs / 1000000000ULL), (long)(waitNs % 1000000000ULL)};
+            nanosleep(&req, NULL);
+        }
+    }
+    clock_gettime(CLOCK_MONOTONIC, &lastPresentTime);
+}
+
 static uint64_t submitFrame(uint64_t a0, uint64_t (*submit)(uint64_t))
 {
     texDump((SDL_GPUCommandBuffer *)(uintptr_t)a0);
@@ -428,7 +445,10 @@ static uint64_t submitFrame(uint64_t a0, uint64_t (*submit)(uint64_t))
     const bool presenting = finishPresent(a0, true);
     const bool dump = presenting && dumpWanted() && recordDump(cb);
     const uint64_t result = submit(a0);
-    if (presenting) countPresent();
+    if (presenting) {
+        countPresent();
+        limitFps();
+    }
     if (dump) writeDump(renderer);
     return result;
 }
