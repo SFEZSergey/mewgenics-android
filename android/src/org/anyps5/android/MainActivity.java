@@ -1041,7 +1041,7 @@ public final class MainActivity extends Activity {
     private void importAndStart(final boolean fresh) {
         final String value = selectedTree();
         final File game = activeGame();
-        if (new File(game, "app.elf").isFile() && new File(game, "libs").isDirectory() && (findExecutableOrEboot(game) != null) && (hasUnlinkedGameModules(game) || staleRelinkLayout(game))) {
+        if (new File(game, "app.elf").isFile() && new File(game, "libs").isDirectory() && (new File(game, "eboot.bin").isFile() || findEbootDirect(game) != null) && (hasUnlinkedGameModules(game) || staleRelinkLayout(game))) {
             normalizeEbootName(game);
             // app.elf собран без модулей игры из Media или по старой раскладке: перелинковка заново из eboot.bin.
             new File(game, "app.elf").delete();
@@ -1108,8 +1108,6 @@ public final class MainActivity extends Activity {
                     clearDirectory(target);
                     if (!staging.renameTo(target)) throw new Exception("Не удалось перенести игру в games/" + id);
                     activate(id);
-                    // Шаг 1: Патчинг сразу после копирования дампа
-                    patchGameElf(target);
                 }
                 setupAndStartGame(activeGame(), fresh);
             } catch (final Throwable e) {
@@ -1126,13 +1124,8 @@ public final class MainActivity extends Activity {
         File executable = new File(game, "app.elf");
         if (!executable.isFile() && !self.isFile()) throw new Exception(t("В выбранной папке не найден eboot.bin или app.elf. Выберите сам каталог дампа.", "No eboot.bin or app.elf in the chosen folder. Pick the dump folder itself."));
 
-        // Шаг 1: Патчинг до релинка (если app.elf уже в наличии)
-        if (executable.isFile()) {
-            patchGameElf(game);
-        }
-
-        // Шаг 2: Релинк (если app.elf отсутствует)
-        if (!executable.isFile()) {
+        // Условие 1: если будет eboot.bin (и нет app.elf), то применяется релинк и делаются патчи
+        if (!executable.isFile() && self.isFile()) {
             statusOnUi(t("Извлекаю ELF из eboot.bin…", "Extracting the ELF from eboot.bin…"));
             extractSelf(self, new File(game, "eboot.elf"));
             stageGameModules(game);
@@ -1141,14 +1134,16 @@ public final class MainActivity extends Activity {
             runRelinker(game);
             Files.write(new File(game, ".relink-layout").toPath(), relinkLayout(game).getBytes());
         }
-        if (!executable.isFile()) throw new Exception("Relinker завершился, но app.elf не создан");
+
+        // Условие 2: если будет app.elf, то релинк не применяется
+        if (!executable.isFile()) throw new Exception("app.elf не найден и не был создан");
         linkGameResources(game);
         if (!executable.setExecutable(true, false)) throw new Exception("Не удалось разрешить запуск app.elf");
         copyPackagedRuntime("runtime/prx", new File(game, "libs"));
         linkGuestPrxLibraries(game);
         copyPackagedRuntime("runtime/x64lib", new File(game, "x64lib"));
 
-        // Шаг 3: Патчинг после релинка
+        // Применяются патчи (через postRelinkGame)
         postRelinkGame(game);
         Files.write(new File(game, ".runtime-stamp").toPath(), Long.toString(getPackageManager().getPackageInfo(getPackageName(), 0).lastUpdateTime).getBytes());
         runOnUiThread(new Runnable() { @Override public void run() {
@@ -1745,8 +1740,6 @@ public final class MainActivity extends Activity {
                 clearDirectory(target);
                 if (!staging.renameTo(target)) throw new Exception("Не удалось перенести игру в games/" + id);
                 activate(id);
-                // Шаг 1: Патчинг сразу после копирования дампа
-                patchGameElf(target);
                 setupAndStartGame(activeGame(), true);
             } catch (final Throwable e) {
                 runOnUiThread(new Runnable() { @Override public void run() {
