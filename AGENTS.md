@@ -1,19 +1,19 @@
-# Памятка для ИИ-ассистента
+# AI assistant notes
 
-Отвечай пользователю по-русски. Это порт Mewgenics (PS5) на Android, см. `README.md` и `TOOLS.md`.
+Reply to the user in Russian. This is an Android port of Mewgenics (PS5); see `README.md` and `TOOLS.md`.
 
-Правила работы (договорённости с пользователем):
-* Не запускать и не перезапускать игру в цикле; один запуск после сборки — можно, если пользователь не против.
-  Закрывать игру для установки APK можно. Не нажимать на экран и не делать снимки без запроса —
-  для снимков есть `tools/sesscap.sh` (сам снимает, пока игра на экране).
-* Делать всё найденное одной партией и одной сборкой, коротким отчётом: квота ограничена.
-* Не сливать большие обновления upstream без спроса.
-* Цель — нативный ARM максимально (заменять x86-код ARM64-кодом, логику игры не менять, бит в бит).
-* Данные игры в репозиторий не класть.
+Working agreements:
+* Do not launch or restart the game in a loop. One launch after a build is allowed if the user agrees.
+  The game may be closed to install an APK. Do not tap the screen or take screenshots unless asked;
+  `tools/sesscap.sh` can capture screenshots passively while the game is on screen.
+* Batch all discovered changes into one pass and one build, then give a brief report: quota is limited.
+* Do not merge large upstream updates without asking.
+* The goal is to maximize native ARM code (replace x86 code with ARM64 code, preserve game logic bit for bit).
+* Do not put game data in the repository.
 
-Где что чинить:
-* Картинка нативного пути — `android/sdlgpu/backend.c` (переопределения слотов `L_*`),
-  `shim.c` (замена SDL3-рантайма), `hostwin.c` (окно/Vulkan-загрузчик APK), `gen_adapters.py`
-  (генерирует `adapters.inc` из `SDL_sysgpu.h`).
-* Мост box64 — `patches/box64-local.patch` (`src/tools/aps5hot.c`).
-* Проверять гипотезы по логу (`$G/box64.log`, строки `[sdlgpu]`) и снимкам сборщика, а не на глаз.
+Where to make changes:
+* Native rendering path: `android/sdlgpu/backend.c` (overrides for `L_*` slots),
+  `shim.c` (SDL3 runtime replacement), `hostwin.c` (APK window/Vulkan loader), and
+  `gen_adapters.py` (generates `adapters.inc` from `SDL_sysgpu.h`).
+* box64 bridge: `patches/box64-local.patch` (`src/tools/aps5hot.c`).
+* Check hypotheses against logs (`$G/box64.log`, `[sdlgpu]` lines) and collector screenshots, not by eye.

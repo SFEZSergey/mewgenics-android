@@ -24,7 +24,7 @@ public final class TouchLayoutActivity extends Activity {
     private Button opacityButton;
 
     private boolean russian() {
-        final String chosen = getSharedPreferences("MainActivity", MODE_PRIVATE).getString("ui_language", "system");
+        final String chosen = getSharedPreferences("MainActivity", MODE_PRIVATE).getString("ui_language", "en");
         if (chosen.equals("ru")) return true;
         if (chosen.equals("en")) return false;
         return Locale.getDefault().getLanguage().equals("ru");

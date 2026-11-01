@@ -351,7 +351,7 @@ public final class MainActivity extends Activity {
 
 
     // ---- Язык лаунчера: "system" (по языку телефона), "ru", "en". ----
-    private String uiLanguage() { return getPreferences(MODE_PRIVATE).getString("ui_language", "system"); }
+    private String uiLanguage() { return getPreferences(MODE_PRIVATE).getString("ui_language", "en"); }
     private boolean russian() {
         final String chosen = uiLanguage();
         if (chosen.equals("ru")) return true;
@@ -379,7 +379,7 @@ public final class MainActivity extends Activity {
     // ---- Язык игры: номер языка консоли PS5 (ANYPS5_LANGUAGE), "auto" — по языку телефона. ----
     private static final int[] GAME_LANGUAGE_CODES = {1, 18, 8, 30, 4, 2, 22, 3, 20, 5, 6, 7, 17, 16, 19, 23, 24, 25, 26, 12, 13, 14, 15, 0, 9, 11, 10, 21, 27, 28, 29};
     private static final String[] GAME_LANGUAGE_NAMES = {"English (US)", "English (UK)", "Русский", "Українська", "Deutsch", "Français", "Français (Canada)", "Español (España)", "Español (Latinoamérica)", "Italiano", "Nederlands", "Português (Portugal)", "Português (Brasil)", "Polski", "Türkçe", "Čeština", "Magyar", "Ελληνικά", "Română", "Suomi", "Svenska", "Dansk", "Norsk", "日本語", "한국어", "简体中文", "繁體中文", "العربية", "ไทย", "Tiếng Việt", "Bahasa Indonesia"};
-    private String gameLanguageSetting() { return getPreferences(MODE_PRIVATE).getString("game_language", "auto"); }
+    private String gameLanguageSetting() { return getPreferences(MODE_PRIVATE).getString("game_language", "1"); }
     private static int consoleLanguageFor(Locale locale) {
         final String language = locale.getLanguage(), country = locale.getCountry();
         switch (language) {
