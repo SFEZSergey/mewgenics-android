@@ -101,10 +101,47 @@ static mouse_publish_direct_fn mouse_publish_direct(void) {
 
 extern uintptr_t Aps5GetAppElfDelta(void) __attribute__((weak));
 
+static uintptr_t get_app_elf_delta_fallback(void) {
+    if (Aps5GetAppElfDelta != NULL) {
+        uintptr_t d = Aps5GetAppElfDelta();
+        if (d != 0) return d;
+    }
+    typedef uintptr_t (*delta_fn)(void);
+    static delta_fn dlsym_delta = NULL;
+    if (dlsym_delta == NULL) {
+        void *box = dlopen("libbox64.so", RTLD_NOW | RTLD_NOLOAD);
+        if (box != NULL) dlsym_delta = (delta_fn)dlsym(box, "Aps5GetAppElfDelta");
+        if (dlsym_delta == NULL) dlsym_delta = (delta_fn)dlsym(RTLD_DEFAULT, "Aps5GetAppElfDelta");
+    }
+    if (dlsym_delta != NULL) {
+        uintptr_t d = dlsym_delta();
+        if (d != 0) return d;
+    }
+    // Fallback: считываем базовый адрес app.elf из /proc/self/maps
+    static uintptr_t parsed_delta = 0;
+    if (parsed_delta != 0) return parsed_delta;
+    FILE *maps = fopen("/proc/self/maps", "r");
+    if (maps != NULL) {
+        char line[512];
+        while (fgets(line, sizeof(line), maps)) {
+            if (strstr(line, "app.elf") != NULL) {
+                uintptr_t start = 0;
+                if (sscanf(line, "%lx-", &start) == 1 && start != 0) {
+                    parsed_delta = start;
+                    LOG(ANDROID_LOG_INFO, "found app.elf base in maps: 0x%lx", (unsigned long)parsed_delta);
+                    break;
+                }
+            }
+        }
+        fclose(maps);
+    }
+    return parsed_delta;
+}
+
 JNIEXPORT void JNICALL Java_org_anyps5_android_GameActivity_nativeTouchDirect(JNIEnv *env, jclass cls, jint x, jint y, jint button, jboolean pressed) {
     (void)env;
     (void)cls;
-    const uintptr_t delta = Aps5GetAppElfDelta ? Aps5GetAppElfDelta() : 0;
+    const uintptr_t delta = get_app_elf_delta_fallback();
     const mouse_publish_direct_fn pub_direct = mouse_publish_direct();
     if (pub_direct != NULL) {
         pub_direct(x, y, (uint32_t)button, pressed, delta);

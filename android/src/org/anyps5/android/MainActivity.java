@@ -291,7 +291,7 @@ public final class MainActivity extends Activity {
         CheckBox touchBox = option("", touch.getBoolean("visible", !TouchControlsView.hasPhysicalGamepad()));
         touchBox.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() { @Override public void onCheckedChanged(CompoundButton b, boolean on) { touch.edit().putBoolean("visible", on).apply(); } });
         row(list, t("Сенсорное управление", "Touch controls"), touchBox);
-        CheckBox mouseBox = option("", touch.getBoolean("mouse", false));
+        CheckBox mouseBox = option("", touch.getBoolean("mouse", true));
         mouseBox.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() { @Override public void onCheckedChanged(CompoundButton b, boolean on) { touch.edit().putBoolean("mouse", on).apply(); } });
         row(list, t("Касания — мышь (как тачпад): ведите пальцем мимо кнопок, тап — клик, двумя пальцами — правый клик, удержание и ведение — перетаскивание",
             "Touch as a mouse (like a touchpad): slide a finger away from the buttons, tap to click, two-finger tap to right-click, hold and slide to drag"), mouseBox);

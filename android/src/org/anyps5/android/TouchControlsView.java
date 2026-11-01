@@ -104,7 +104,7 @@ public final class TouchControlsView extends View {
         super(context);
         this.editing = editing;
         preferences = context.getSharedPreferences("touch_controls", Context.MODE_PRIVATE);
-        touchMouse = preferences.getBoolean("direct_touch", preferences.getBoolean("mouse", true));
+        touchMouse = true;
         longPressMs = preferences.getLong("long_press_ms", DEFAULT_LONG_PRESS_MS);
         visible = editing || preferences.getBoolean("visible", false);
         controls = createControls();
