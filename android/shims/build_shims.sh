@@ -27,6 +27,12 @@ compile "$HERE/src/MinimalUserService.cpp" "libSceUserService.so"
 compile "$HERE/src/MinimalSystemService.cpp" "libSceSystemService.so"
 compile "$HERE/src/MinimalRtc.cpp" "libSceRtc.so"
 compile "$HERE/src/NativeMouse.cpp" "libSceMouse.so"
+compile "$HERE/../../AnyPS5/core/libs/prx/libSceImeDialog/Export.cpp" "libSceImeDialog.so" -I"$HERE/../../AnyPS5/core/libs" -I"$HERE/../../AnyPS5/core/libs/prx/libkernel/include"
+compile "$HERE/../../AnyPS5/core/libs/prx/libSceNetCtl/Export.cpp" "libSceNetCtl.so" -I"$HERE/../../AnyPS5/core/libs" -I"$HERE/../../AnyPS5/core/libs/prx/libkernel/include"
+compile "$HERE/../../AnyPS5/core/libs/prx/libSceWebBrowserDialog/Export.cpp" "libSceWebBrowserDialog.so" -I"$HERE/../../AnyPS5/core/libs" -I"$HERE/../../AnyPS5/core/libs/prx/libkernel/include"
+compile "$HERE/../../AnyPS5/core/libs/prx/libSceAudioIn/Export.cpp" "libSceAudioIn.so" -I"$HERE/../../AnyPS5/core/libs" -I"$HERE/../../AnyPS5/core/libs/prx/libkernel/include" -I"$HERE/../../AnyPS5/3rdparty/SDL2/include"
+compile "$HERE/../../AnyPS5/core/libs/prx/libSceSaveDataDialog.native/Export.cpp" "libSceSaveDataDialog.native.so" -I"$HERE/../../AnyPS5/core/libs" -I"$HERE/../../AnyPS5/core/libs/prx/libkernel/include"
+compile "$HERE/../../AnyPS5/core/libs/prx/libSceSaveData.native/Export.cpp" "libSceSaveData.native.so" -I"$HERE/../../AnyPS5/core/libs" -I"$HERE/../../AnyPS5/core/libs/prx/libkernel/include"
 
 echo "=== Готово! Список собранных нативных библиотек: ==="
 ls -lh "$HERE"/*.so

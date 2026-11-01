@@ -4,7 +4,7 @@ from pathlib import Path
 
 def main():
     root = Path(__file__).resolve().parent.parent
-    src_apk = root / "Mewgenics-Optimized.apk"
+    src_apk = root / "Mewgenics.apk"
     tmp_unsigned = Path("/tmp/build_apk/app-unsigned.apk")
     tmp_aligned = Path("/tmp/build_apk/app-aligned.apk")
     dex_file = Path("/tmp/build_apk/classes.dex")

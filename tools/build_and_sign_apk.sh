@@ -6,7 +6,7 @@ ROOT="/mnt/c/Mewgenics"
 WORKDIR="/tmp/mewgenics_build"
 PLATFORM_JAR="/opt/android/sdk/platforms/android-35/android.jar"
 R8_JAR="/opt/android/r8.jar"
-SRC_APK="$ROOT/Mewgenics-Optimized.apk"
+SRC_APK="$ROOT/Mewgenics.apk"
 KEYSTORE="$ROOT/android/debug.keystore"
 
 echo "=== 1. Очистка и подготовка $WORKDIR ==="
@@ -30,7 +30,7 @@ python3 - << 'PYEOF'
 import zipfile
 from pathlib import Path
 
-src = Path("/mnt/c/Mewgenics/Mewgenics-Optimized.apk")
+src = Path("/mnt/c/Mewgenics/Mewgenics.apk")
 unsigned = Path("/tmp/mewgenics_build/unsigned.apk")
 dex = Path("/tmp/mewgenics_build/classes.dex").read_bytes()
 sdlgpu_path = Path("/mnt/c/Mewgenics/android/sdlgpu/libaps5sdlgpu.so")

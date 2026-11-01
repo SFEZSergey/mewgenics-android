@@ -15,6 +15,7 @@
 #include <ctime>
 #include <filesystem>
 #include <stdexcept>
+#include <sys/stat.h>
 #include <string>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
@@ -137,11 +138,9 @@ SaveDataParam load_param(const std::string& real_path) {
     SaveDataParam param{};
     read_param_file(param_path(real_path), &param);
     if (param.mtime == 0) {
-        std::error_code ec;
-        const auto written = std::filesystem::last_write_time(real_path, ec);
-        if (!ec) {
-            const auto system = std::filesystem::file_time_type::clock::to_sys(written);
-            param.mtime = std::chrono::duration_cast<std::chrono::seconds>(system.time_since_epoch()).count();
+        struct stat st{};
+        if (stat(real_path.c_str(), &st) == 0) {
+            param.mtime = st.st_mtime;
         }
     }
     return param;

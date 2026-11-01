@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Скрипт развертывания Mewgenics на Android (ColorOS 17 / AnyPS5):
-- Устанавливает подписанный Mewgenics-Optimized.apk
+- Устанавливает подписанный Mewgenics.apk
 - Загружает пропатченный дамп игры PPSA37318
 - Настраивает env.txt для прямого Vulkan пути SDL_GPU 1080p
 """
@@ -36,7 +36,7 @@ def wait_for_device():
 
 def deploy():
     root = Path(__file__).resolve().parent.parent
-    apk_path = root / "Mewgenics-Optimized.apk"
+    apk_path = root / "Mewgenics.apk"
     game_dir = root / "PPSA37318"
 
     if not apk_path.exists():
