@@ -87,7 +87,7 @@ public final class TouchControlsView extends View {
     private float mouseX, mouseY, mouseStartX, mouseStartY, mouseRestX, mouseRestY;
     private long mouseDownTime;
     private boolean mouseMoved, mouseSecondFinger, mouseDragging;
-    private static final long MOUSE_TAP_MS = 250, DEFAULT_LONG_PRESS_MS = 1500L;
+    private static final long MOUSE_TAP_MS = 250, DEFAULT_LONG_PRESS_MS = 400L;
     private final long longPressMs;
     private float opacity;
     private Control selected;
@@ -355,7 +355,9 @@ public final class TouchControlsView extends View {
         }
         if (consumed) {
             recomputeButtons();
-            send();
+            if (visible && buttons != 0) {
+                send();
+            }
             invalidate();
         }
         return consumed;
@@ -400,14 +402,12 @@ public final class TouchControlsView extends View {
     private final Runnable longPressRunnable = new Runnable() {
         @Override public void run() {
             if (mousePointer >= 0 && !mouseMoved && !mouseSecondFinger) {
-                mouseSecondFinger = true;
+                mouseDragging = true;
                 try {
                     performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS);
                 } catch (Throwable ignored) {}
                 final int gx = toGameX(mouseStartX), gy = toGameY(mouseStartY);
-                direct(gx, gy, 1, false);
-                direct(gx, gy, 2, true);
-                direct(gx, gy, 2, false);
+                direct(gx, gy, 1, true);
             }
         }
     };
@@ -420,7 +420,6 @@ public final class TouchControlsView extends View {
             mouseSecondFinger = true;
             removeCallbacks(longPressRunnable);
             final int gx = toGameX(mouseStartX), gy = toGameY(mouseStartY);
-            direct(gx, gy, 1, false);
             direct(gx, gy, 2, true);
             direct(gx, gy, 2, false);
             try {
@@ -434,7 +433,7 @@ public final class TouchControlsView extends View {
         mouseDownTime = event.getEventTime();
         mouseMoved = mouseSecondFinger = mouseDragging = false;
         final int gx = toGameX(mouseStartX), gy = toGameY(mouseStartY);
-        direct(gx, gy, 1, true);
+        direct(gx, gy, 0, false);
         postDelayed(longPressRunnable, longPressMs);
         return true;
     }
@@ -450,7 +449,11 @@ public final class TouchControlsView extends View {
         }
         if (!mouseSecondFinger) {
             final int gx = toGameX(x), gy = toGameY(y);
-            direct(gx, gy, 1, true);
+            if (mouseDragging) {
+                direct(gx, gy, 1, true);
+            } else {
+                direct(gx, gy, 0, false);
+            }
         }
         return true;
     }
@@ -463,7 +466,12 @@ public final class TouchControlsView extends View {
             final float x = index >= 0 ? event.getX(index) : mouseStartX;
             final float y = index >= 0 ? event.getY(index) : mouseStartY;
             final int gx = toGameX(x), gy = toGameY(y);
-            direct(gx, gy, 1, false);
+            if (mouseDragging) {
+                direct(gx, gy, 1, false);
+            } else if (!mouseMoved) {
+                direct(gx, gy, 1, true);
+                direct(gx, gy, 1, false);
+            }
         }
         mousePointer = -1;
         mouseMoved = mouseSecondFinger = mouseDragging = false;
