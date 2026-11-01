@@ -1,4 +1,4 @@
-# mewgenics-android
+# Mewgenics-android
 
 An Android (arm64) port of Mewgenics (PS5, PPSA37318) built on AnyPS5, box64, and Turnip.
 Tested on Snapdragon 8 Elite (Adreno 830), reaching 60 FPS in combat.
