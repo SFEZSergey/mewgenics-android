@@ -14,7 +14,7 @@ rm -rf "$WORKDIR"
 mkdir -p "$WORKDIR/gen" "$WORKDIR/classes"
 
 echo "=== 2. Генерация ресурсов (aapt) ==="
-aapt package -f -m -J "$WORKDIR/gen" -S "$ROOT/android/res" -M "$ROOT/android/AndroidManifest.xml" -I "$PLATFORM_JAR"
+aapt package -f -m -J "$WORKDIR/gen" -S "$ROOT/android/res" -M "$ROOT/android/AndroidManifest.xml" -I "$PLATFORM_JAR" -F "$WORKDIR/resources.ap_"
 
 echo "=== 3. Компиляция Java (javac) ==="
 find "$ROOT/android/src" "$ROOT/AnyPS5/3rdparty/SDL2/android-project/app/src/main/java" "$WORKDIR/gen" -name "*.java" > "$WORKDIR/sources.list"
@@ -38,6 +38,8 @@ sdlgpu = sdlgpu_path.read_bytes() if sdlgpu_path.exists() else None
 shims_dir = Path("/mnt/c/Mewgenics/android/shims")
 
 replacements = {}
+with zipfile.ZipFile("/tmp/mewgenics_build/resources.ap_", "r") as resources:
+    replacements["AndroidManifest.xml"] = resources.read("AndroidManifest.xml")
 if sdlgpu is not None:
     replacements["lib/arm64-v8a/libaps5sdlgpu.so"] = sdlgpu
 for so_file in shims_dir.glob("*.so"):

@@ -15,9 +15,15 @@
 #include <unistd.h>
 #include <dlfcn.h>
 
+#define BCDEC_STATIC
+#define BCDEC_BC4BC5_PRECISE
+#define BCDEC_IMPLEMENTATION
+#include "bcdec.h"
+
 #define EXPORT __attribute__((visibility("default")))
 
 extern SDL_GPUBootstrap VulkanDriver;
+extern bool Aps5SdlGpu_VulkanSupportsTextureFormat(SDL_GPURenderer *renderer, SDL_GPUTextureFormat format);
 
 static SDL_GPUDevice real;
 static bool tracing;       // APS5_SDLGPU_TRACE=1: pass shapes, viewports, scissors, pipelines, uploads in the log
@@ -109,18 +115,22 @@ typedef struct KnownTexture
 {
     SDL_GPUTexture *texture;
     SDL_GPUTextureCreateInfo info;
+    SDL_GPUTextureFormat actualFormat;
+    bool bcDecoded;
     bool logged;
 } KnownTexture;
 // Open addressing by pointer (looked up on every sampler bind; a reused pointer overwrites its entry).
 #define KNOWN_BITS 13
 static KnownTexture known[1u << KNOWN_BITS];
 static Uint32 knownSlot(const void *p) { return (Uint32)((((Uint64)(uintptr_t)p >> 4) * 0x9e3779b97f4a7c15ull) >> (64 - KNOWN_BITS)); }
-static void rememberTexture(SDL_GPUTexture *texture, const SDL_GPUTextureCreateInfo *info)
+static void rememberTexture(SDL_GPUTexture *texture, const SDL_GPUTextureCreateInfo *info, SDL_GPUTextureFormat actualFormat, bool bcDecoded)
 {
     if (!texture) return;
     Uint32 i = knownSlot(texture);
     for (Uint32 n = 0; n < SDL_arraysize(known) && known[i].texture && known[i].texture != texture; ++n) i = (i + 1) & (SDL_arraysize(known) - 1);
     known[i].info = *info;
+    known[i].actualFormat = actualFormat;
+    known[i].bcDecoded = bcDecoded;
     known[i].logged = false;
     known[i].texture = texture;
 }
@@ -560,14 +570,95 @@ static Uint32 blockBytes(SDL_GPUTextureFormat f, Uint32 *block)
     case SDL_GPU_TEXTUREFORMAT_R10G10B10A2_UNORM: return 4;
     case SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT: case SDL_GPU_TEXTUREFORMAT_R32G32_FLOAT: return 8;
     case SDL_GPU_TEXTUREFORMAT_R32G32B32A32_FLOAT: return 16;
-    case SDL_GPU_TEXTUREFORMAT_BC1_RGBA_UNORM: case SDL_GPU_TEXTUREFORMAT_BC4_R_UNORM: *block = 4; return 8;
-    case SDL_GPU_TEXTUREFORMAT_BC2_RGBA_UNORM: case SDL_GPU_TEXTUREFORMAT_BC3_RGBA_UNORM: case SDL_GPU_TEXTUREFORMAT_BC5_RG_UNORM:
-    case SDL_GPU_TEXTUREFORMAT_BC7_RGBA_UNORM: *block = 4; return 16;
+    case SDL_GPU_TEXTUREFORMAT_BC1_RGBA_UNORM: case SDL_GPU_TEXTUREFORMAT_BC1_RGBA_UNORM_SRGB:
+    case SDL_GPU_TEXTUREFORMAT_BC4_R_UNORM: *block = 4; return 8;
+    case SDL_GPU_TEXTUREFORMAT_BC2_RGBA_UNORM: case SDL_GPU_TEXTUREFORMAT_BC2_RGBA_UNORM_SRGB:
+    case SDL_GPU_TEXTUREFORMAT_BC3_RGBA_UNORM: case SDL_GPU_TEXTUREFORMAT_BC3_RGBA_UNORM_SRGB:
+    case SDL_GPU_TEXTUREFORMAT_BC5_RG_UNORM: case SDL_GPU_TEXTUREFORMAT_BC6H_RGB_FLOAT: case SDL_GPU_TEXTUREFORMAT_BC6H_RGB_UFLOAT:
+    case SDL_GPU_TEXTUREFORMAT_BC7_RGBA_UNORM: case SDL_GPU_TEXTUREFORMAT_BC7_RGBA_UNORM_SRGB: *block = 4; return 16;
     default: return 0;
     }
 }
 
+static bool bcFallbackFormat(SDL_GPUTextureFormat source, SDL_GPUTextureFormat *target)
+{
+    switch (source) {
+    case SDL_GPU_TEXTUREFORMAT_BC1_RGBA_UNORM: *target = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM; return true;
+    case SDL_GPU_TEXTUREFORMAT_BC1_RGBA_UNORM_SRGB: *target = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB; return true;
+    case SDL_GPU_TEXTUREFORMAT_BC2_RGBA_UNORM: *target = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM; return true;
+    case SDL_GPU_TEXTUREFORMAT_BC2_RGBA_UNORM_SRGB: *target = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB; return true;
+    case SDL_GPU_TEXTUREFORMAT_BC3_RGBA_UNORM: *target = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM; return true;
+    case SDL_GPU_TEXTUREFORMAT_BC3_RGBA_UNORM_SRGB: *target = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB; return true;
+    case SDL_GPU_TEXTUREFORMAT_BC4_R_UNORM: *target = SDL_GPU_TEXTUREFORMAT_R8_UNORM; return true;
+    case SDL_GPU_TEXTUREFORMAT_BC5_RG_UNORM: *target = SDL_GPU_TEXTUREFORMAT_R8G8_UNORM; return true;
+    case SDL_GPU_TEXTUREFORMAT_BC6H_RGB_FLOAT: case SDL_GPU_TEXTUREFORMAT_BC6H_RGB_UFLOAT:
+        *target = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT; return true;
+    case SDL_GPU_TEXTUREFORMAT_BC7_RGBA_UNORM: *target = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM; return true;
+    case SDL_GPU_TEXTUREFORMAT_BC7_RGBA_UNORM_SRGB: *target = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB; return true;
+    default: return false;
+    }
+}
+
+static Uint8 *decodeBcUpload(const KnownTexture *texture, const SDL_GPUTextureTransferInfo *source,
+                             const SDL_GPUTextureRegion *region, const Uint8 *input, Uint32 *decodedSize)
+{
+    Uint32 block = 1, sourceBlockBytes = blockBytes(texture->info.format, &block);
+    Uint32 outputBlock = 1, outputBytes = blockBytes(texture->actualFormat, &outputBlock);
+    const Uint32 width = region->w, height = region->h, depth = region->d ? region->d : 1;
+    const Uint32 sourceWidth = source->pixels_per_row ? source->pixels_per_row : width;
+    const Uint32 sourceHeight = source->rows_per_layer ? source->rows_per_layer : height;
+    const Uint64 srcBlocksPerRow = (sourceWidth + block - 1) / block;
+    const Uint64 srcBlockRows = (sourceHeight + block - 1) / block;
+    const Uint64 srcSliceBytes = srcBlocksPerRow * srcBlockRows * sourceBlockBytes;
+    const Uint64 outputSize = (Uint64)width * height * depth * outputBytes;
+    if (!sourceBlockBytes || !outputBytes || outputBlock != 1 || sourceWidth < width || sourceHeight < height ||
+        outputSize > UINT32_MAX || !width || !height || !depth) return NULL;
+    Uint8 *output = malloc((size_t)outputSize);
+    if (!output) return NULL;
+    for (Uint32 z = 0; z < depth; ++z) {
+        const Uint8 *slice = input + (size_t)(z * srcSliceBytes);
+        Uint8 *dstSlice = output + (size_t)z * width * height * outputBytes;
+        for (Uint32 by = 0; by < (height + 3) / 4; ++by) {
+            for (Uint32 bx = 0; bx < (width + 3) / 4; ++bx) {
+                const Uint8 *srcBlock = slice + ((size_t)by * srcBlocksPerRow + bx) * sourceBlockBytes;
+                Uint8 blockData[4 * 4 * 8] = {0};
+                if (texture->info.format == SDL_GPU_TEXTUREFORMAT_BC1_RGBA_UNORM || texture->info.format == SDL_GPU_TEXTUREFORMAT_BC1_RGBA_UNORM_SRGB)
+                    bcdec_bc1(srcBlock, blockData, 16);
+                else if (texture->info.format == SDL_GPU_TEXTUREFORMAT_BC2_RGBA_UNORM || texture->info.format == SDL_GPU_TEXTUREFORMAT_BC2_RGBA_UNORM_SRGB)
+                    bcdec_bc2(srcBlock, blockData, 16);
+                else if (texture->info.format == SDL_GPU_TEXTUREFORMAT_BC3_RGBA_UNORM || texture->info.format == SDL_GPU_TEXTUREFORMAT_BC3_RGBA_UNORM_SRGB)
+                    bcdec_bc3(srcBlock, blockData, 16);
+                else if (texture->info.format == SDL_GPU_TEXTUREFORMAT_BC4_R_UNORM)
+                    bcdec_bc4(srcBlock, blockData, 4, 0);
+                else if (texture->info.format == SDL_GPU_TEXTUREFORMAT_BC5_RG_UNORM)
+                    bcdec_bc5(srcBlock, blockData, 8, 0);
+                else if (texture->info.format == SDL_GPU_TEXTUREFORMAT_BC6H_RGB_FLOAT || texture->info.format == SDL_GPU_TEXTUREFORMAT_BC6H_RGB_UFLOAT)
+                    bcdec_bc6h_half(srcBlock, blockData, 24, texture->info.format == SDL_GPU_TEXTUREFORMAT_BC6H_RGB_FLOAT);
+                else if (texture->info.format == SDL_GPU_TEXTUREFORMAT_BC7_RGBA_UNORM || texture->info.format == SDL_GPU_TEXTUREFORMAT_BC7_RGBA_UNORM_SRGB)
+                    bcdec_bc7(srcBlock, blockData, 16);
+                else { free(output); return NULL; }
+                for (Uint32 py = 0; py < 4 && by * 4 + py < height; ++py) {
+                    for (Uint32 px = 0; px < 4 && bx * 4 + px < width; ++px) {
+                        Uint8 *dst = dstSlice + ((size_t)(by * 4 + py) * width + bx * 4 + px) * outputBytes;
+                        const Uint8 *src = blockData + ((size_t)py * 4 + px) * (texture->actualFormat == SDL_GPU_TEXTUREFORMAT_R8_UNORM ? 1 :
+                            texture->actualFormat == SDL_GPU_TEXTUREFORMAT_R8G8_UNORM ? 2 : texture->actualFormat == SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT ? 6 : 4);
+                        if (texture->actualFormat == SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT) {
+                            memcpy(dst, src, 6);
+                            dst[6] = 0x00; dst[7] = 0x3c;
+                        } else {
+                            memcpy(dst, src, outputBytes);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    *decodedSize = (Uint32)outputSize;
+    return output;
+}
+
 static __thread SDL_GPUTransferBuffer *uploadRealigned;  // per call, released after the upload is recorded
+static __thread SDL_GPUTransferBuffer *uploadDecoded;
 static void uploadTexture(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3)
 {
     static int reports;
@@ -594,14 +685,39 @@ static void uploadTexture(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3)
                 t ? t->info.num_levels : 0, region.mip_level, region.layer, region.x, region.y, region.z, region.w, region.h, region.d, source.offset,
                 source.pixels_per_row, source.rows_per_layer);
     }
+    if (t && t->bcDecoded) {
+        SDL_GPURenderer *renderer = real.driverData;
+        const Uint8 *mapped = real.MapTransferBuffer(renderer, source.transfer_buffer, false);
+        if (!mapped) { SDL_SetError("could not map source buffer for BC texture decode"); return; }
+        Uint32 decodedSize = 0;
+        Uint8 *decoded = decodeBcUpload(t, &source, &region, mapped + source.offset, &decodedSize);
+        real.UnmapTransferBuffer(renderer, source.transfer_buffer);
+        if (!decoded) { SDL_SetError("unsupported or invalid BC texture upload (format %d, %ux%ux%u)", (int)t->info.format, region.w, region.h, region.d); return; }
+        uploadDecoded = real.CreateTransferBuffer(renderer, SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, decodedSize, "BC decode upload");
+        Uint8 *destination = uploadDecoded ? real.MapTransferBuffer(renderer, uploadDecoded, false) : NULL;
+        if (!destination) {
+            free(decoded);
+            if (uploadDecoded) real.ReleaseTransferBuffer(renderer, uploadDecoded);
+            uploadDecoded = NULL;
+            SDL_SetError("could not allocate transfer buffer for BC texture decode");
+            return;
+        }
+        memcpy(destination, decoded, decodedSize);
+        free(decoded);
+        real.UnmapTransferBuffer(renderer, uploadDecoded);
+        source.transfer_buffer = uploadDecoded;
+        source.offset = 0;
+        source.pixels_per_row = region.w;
+        source.rows_per_layer = region.h;
+    }
     // Vulkan needs the buffer offset of a texture upload to be a multiple of the texel block size (16 for
     // BC formats, else at least 4); the title's atlas uploads start at offset = 4 (mod 16), which Agc
     // takes and Turnip rounds down (every block shifted: noise on all levels). Such regions are copied
     // from the title's transfer buffer into an aligned one here (the data is already written).
     if (t) {
-        Uint32 block = 1, bytes = blockBytes(t->info.format, &block);
+        Uint32 block = 1, bytes = blockBytes(t->bcDecoded ? t->actualFormat : t->info.format, &block);
         const Uint32 align = bytes > 4 ? bytes : 4;
-        if (bytes && source.offset % align) {
+        if (!t->bcDecoded && bytes && source.offset % align) {
             static unsigned long realigned;
             const Uint32 rowPixels = source.pixels_per_row ? source.pixels_per_row : region.w;
             const Uint32 layerRows = source.rows_per_layer ? source.rows_per_layer : region.h;
@@ -636,7 +752,7 @@ static void uploadTexture(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3)
         (region.z != 0 || region.d > 1)) {
         const Uint32 layers = region.d ? region.d : 1;
         Uint32 block;
-        const Uint32 bytes = blockBytes(t->info.format, &block);
+        const Uint32 bytes = blockBytes(t->bcDecoded ? t->actualFormat : t->info.format, &block);
         const Uint32 rowPixels = source.pixels_per_row ? source.pixels_per_row : region.w;
         const Uint32 rows = source.rows_per_layer ? source.rows_per_layer : region.h;
         const Uint64 layerBytes = (Uint64)((rowPixels + block - 1) / block) * ((rows + block - 1) / block) * bytes;
@@ -668,10 +784,15 @@ static void uploadTexture(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3)
 static uint64_t L_UploadToTexture(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3)
 {
     uploadRealigned = NULL;
+    uploadDecoded = NULL;
     uploadTexture(a0, a1, a2, a3);
     if (uploadRealigned) {
         real.ReleaseTransferBuffer(real.driverData, uploadRealigned);
         uploadRealigned = NULL;
+    }
+    if (uploadDecoded) {
+        real.ReleaseTransferBuffer(real.driverData, uploadDecoded);
+        uploadDecoded = NULL;
     }
     return 0;
 }
@@ -1098,10 +1219,19 @@ static void zeroTexture(SDL_GPURenderer *renderer, SDL_GPUTexture *texture, cons
 static uint64_t L_CreateTexture(uint64_t a0, uint64_t a1)
 {
     const SDL_GPUTextureCreateInfo *info = (const SDL_GPUTextureCreateInfo *)(uintptr_t)a1;
-    const uint64_t texture = A_CreateTexture(a0, a1);
-    rememberTexture((SDL_GPUTexture *)(uintptr_t)texture, info);
-    noteAtlas((SDL_GPUTexture *)(uintptr_t)texture, info);
-    zeroTexture((SDL_GPURenderer *)(uintptr_t)a0, (SDL_GPUTexture *)(uintptr_t)texture, info);
+    SDL_GPUTextureCreateInfo actualInfo = *info;
+    SDL_GPUTextureFormat fallbackFormat = info->format;
+    const bool bcDecoded = bcFallbackFormat(info->format, &fallbackFormat) &&
+        !Aps5SdlGpu_VulkanSupportsTextureFormat((SDL_GPURenderer *)(uintptr_t)a0, info->format);
+    if (bcDecoded) {
+        actualInfo.format = fallbackFormat;
+        fprintf(stderr, "[sdlgpu] BC format %d is unsupported for sampling; decoding uploads to format %d (%ux%ux%u)\n",
+                (int)info->format, (int)fallbackFormat, info->width, info->height, info->layer_count_or_depth);
+    }
+    const uint64_t texture = bcDecoded ? A_CreateTexture(a0, (uint64_t)(uintptr_t)&actualInfo) : A_CreateTexture(a0, a1);
+    rememberTexture((SDL_GPUTexture *)(uintptr_t)texture, info, actualInfo.format, bcDecoded);
+    noteAtlas((SDL_GPUTexture *)(uintptr_t)texture, bcDecoded ? &actualInfo : info);
+    zeroTexture((SDL_GPURenderer *)(uintptr_t)a0, (SDL_GPUTexture *)(uintptr_t)texture, bcDecoded ? &actualInfo : info);
     if (texture && (info->usage & SDL_GPU_TEXTUREUSAGE_COLOR_TARGET))  // sesscap tells hub/combat by these
         fprintf(stderr, "[sdlgpu] target %ux%u format %d levels %u layers %u\n", info->width, info->height, (int)info->format, info->num_levels, info->layer_count_or_depth);
     noteTableTexture((SDL_GPURenderer *)(uintptr_t)a0, (SDL_GPUTexture *)(uintptr_t)texture, info);

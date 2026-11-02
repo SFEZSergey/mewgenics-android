@@ -148,5 +148,29 @@ queue_new = '''    if (*queueFamilyIndex == SDL_MAX_UINT32) {
 assert queue_old in s, "Could not find queueFamilyIndex return check"
 s = s.replace(queue_old, queue_new, 1)
 
+# The SDL_GPU bridge uses this query to choose a CPU-decoded upload format when a Vulkan driver
+# cannot sample the compressed format supplied by the title.
+format_query = '''
+__attribute__((visibility("default"))) bool Aps5SdlGpu_VulkanSupportsTextureFormat(
+    SDL_GPURenderer *driverData,
+    SDL_GPUTextureFormat format)
+{
+    VulkanRenderer *renderer = (VulkanRenderer *)driverData;
+    VkFormatProperties properties;
+    if ((Uint32)format >= SDL_arraysize(SDLToVK_TextureFormat)) {
+        return false;
+    }
+    renderer->vkGetPhysicalDeviceFormatProperties(
+        renderer->physicalDevice,
+        SDLToVK_TextureFormat[format],
+        &properties);
+    return (properties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
+}
+
+'''
+anchor = 'static SDL_GPUTexture *VULKAN_CreateTexture('
+assert anchor in s, "Could not find VULKAN_CreateTexture anchor"
+s = s.replace(anchor, format_query + anchor, 1)
+
 open(dst, 'w').write(s)
 print('patched', count)
