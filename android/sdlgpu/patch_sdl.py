@@ -85,5 +85,68 @@ vk_create_old = 'vulkanResult = renderer->vkCreateSwapchainKHR(\n        rendere
 vk_create_new = 'fprintf(stderr, "[sdlgpu] calling vkCreateSwapchainKHR (%ux%u, format %d, count %u)\\n", windowData->width, windowData->height, (int)windowData->format, requestedImageCount);\n    ' + vk_create_old + '\n    fprintf(stderr, "[sdlgpu] vkCreateSwapchainKHR returned %d\\n", (int)vulkanResult);'
 s = s.replace(vk_create_old, vk_create_new, 1)
 
+# Allow Vulkan 1.1+ mobile drivers where VK_KHR_maintenance1 is core and not reported as extension
+ext_old = '    return (supports->KHR_swapchain &&\n            supports->KHR_maintenance1);'
+ext_new = '    // KHR_swapchain is required for presentation; maintenance1 is core in Vulkan 1.1+\n    return (supports->KHR_swapchain != 0);'
+assert ext_old in s, "Could not find CheckDeviceExtensions return check"
+s = s.replace(ext_old, ext_new, 1)
+
+# Relax device feature checks in VULKAN_INTERNAL_IsDeviceSuitable for mobile GPUs (Mali, etc.)
+feat_old = '''    if ((!deviceFeatures.independentBlend && features->desiredVulkan10DeviceFeatures.independentBlend) ||
+        (!deviceFeatures.imageCubeArray && features->desiredVulkan10DeviceFeatures.imageCubeArray) ||
+        (!deviceFeatures.depthClamp && features->desiredVulkan10DeviceFeatures.depthClamp) ||
+        (!deviceFeatures.shaderClipDistance && features->desiredVulkan10DeviceFeatures.shaderClipDistance) ||
+        (!deviceFeatures.drawIndirectFirstInstance && features->desiredVulkan10DeviceFeatures.drawIndirectFirstInstance) ||
+        (!deviceFeatures.sampleRateShading && features->desiredVulkan10DeviceFeatures.sampleRateShading) ||
+        (!deviceFeatures.samplerAnisotropy && features->desiredVulkan10DeviceFeatures.samplerAnisotropy)) {
+        return 0;
+    }'''
+
+feat_new = '''    {
+        VkPhysicalDeviceProperties devProps;
+        renderer->vkGetPhysicalDeviceProperties(physicalDevice, &devProps);
+        fprintf(stderr, "[sdlgpu] Evaluating device: %s (API %u.%u.%u, driver %u, type %u)\\n",
+                devProps.deviceName,
+                VK_API_VERSION_MAJOR(devProps.apiVersion),
+                VK_API_VERSION_MINOR(devProps.apiVersion),
+                VK_API_VERSION_PATCH(devProps.apiVersion),
+                devProps.driverVersion, devProps.deviceType);
+        fprintf(stderr, "[sdlgpu] Available features: blend=%d cube=%d depthClamp=%d clip=%d drawIndirect=%d sampleRate=%d aniso=%d\\n",
+                deviceFeatures.independentBlend, deviceFeatures.imageCubeArray,
+                deviceFeatures.depthClamp, deviceFeatures.shaderClipDistance,
+                deviceFeatures.drawIndirectFirstInstance, deviceFeatures.sampleRateShading,
+                deviceFeatures.samplerAnisotropy);
+    }
+
+    // Clamp desired features to what hardware actually supports instead of rejecting device
+    if (!deviceFeatures.independentBlend) features->desiredVulkan10DeviceFeatures.independentBlend = VK_FALSE;
+    if (!deviceFeatures.imageCubeArray) features->desiredVulkan10DeviceFeatures.imageCubeArray = VK_FALSE;
+    if (!deviceFeatures.depthClamp) features->desiredVulkan10DeviceFeatures.depthClamp = VK_FALSE;
+    if (!deviceFeatures.shaderClipDistance) features->desiredVulkan10DeviceFeatures.shaderClipDistance = VK_FALSE;
+    if (!deviceFeatures.drawIndirectFirstInstance) features->desiredVulkan10DeviceFeatures.drawIndirectFirstInstance = VK_FALSE;
+    if (!deviceFeatures.sampleRateShading) features->desiredVulkan10DeviceFeatures.sampleRateShading = VK_FALSE;
+    if (!deviceFeatures.samplerAnisotropy) features->desiredVulkan10DeviceFeatures.samplerAnisotropy = VK_FALSE;'''
+assert feat_old in s, "Could not find VULKAN_INTERNAL_IsDeviceSuitable feature check"
+s = s.replace(feat_old, feat_new, 1)
+
+# Instrument device rejection/acceptance in VULKAN_INTERNAL_IsDeviceSuitable
+queue_old = '''    if (*queueFamilyIndex == SDL_MAX_UINT32) {
+        // Somehow no graphics queues existed. Compute-only device?
+        return 0;
+    }
+
+    // FIXME: Need better structure for checking vs storing swapchain support details
+    return 1;'''
+
+queue_new = '''    if (*queueFamilyIndex == SDL_MAX_UINT32) {
+        fprintf(stderr, "[sdlgpu] Device rejected: no graphics queue family with presentation\\n");
+        return 0;
+    }
+
+    fprintf(stderr, "[sdlgpu] Device ACCEPTED: queueFamilyIndex=%u\\n", *queueFamilyIndex);
+    return 1;'''
+assert queue_old in s, "Could not find queueFamilyIndex return check"
+s = s.replace(queue_old, queue_new, 1)
+
 open(dst, 'w').write(s)
 print('patched', count)

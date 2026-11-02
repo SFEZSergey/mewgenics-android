@@ -10,11 +10,12 @@ Tested on Snapdragon 8 Elite (Adreno 830), reaching stable 60 FPS in combat.
 
 ## Releases & Downloads
 
-- **Current Version:** `v0.1.5-beta`
-- **Download APK:** [`Mewgenics.apk`](https://github.com/SFEZSergey/mewgenics-android/releases/tag/v0.1.5-Beta) from GitHub Releases
+- **Current Version:** `v0.1.6-beta`
+- **Download APK:** [`Mewgenics.apk`](https://github.com/SFEZSergey/mewgenics-android/releases/tag/v0.1.6-Beta) from GitHub Releases
 
-### Key Features in v0.1.5-beta:
-* **Native SDL_GPU Vulkan:** Bypasses heavy PS5 AGC translation; renders directly on Qualcomm Adreno GPU via Turnip (Mesa 26.3).
+### Key Features in v0.1.6-beta:
+* **MediaTek & ARM Mali GPU Support:** Fixed startup crashes on MediaTek (Dimensity, MT6899, etc.) and ARM Mali GPUs (Mali-G720 / Immortalis). Relaxed strict desktop Vulkan feature requirements (`sampleRateShading`, `depthClamp`, `drawIndirectFirstInstance`, `shaderClipDistance`) and enabled compatibility with core Vulkan 1.1+ drivers without requiring optional extensions (`VK_KHR_maintenance1`).
+* **Native SDL_GPU Vulkan:** Bypasses heavy PS5 AGC translation; renders directly on Qualcomm Adreno (via Turnip) and ARM Mali / MediaTek GPUs.
 * **Native AAudio Engine:** Low-latency 48 kHz stereo audio output with hardware audio clock synchronization.
 * **Refined Touch Controls:**
   * Single tap: Left click.

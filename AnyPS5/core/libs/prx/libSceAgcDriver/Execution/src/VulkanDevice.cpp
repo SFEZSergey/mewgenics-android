@@ -1128,7 +1128,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     deviceInfo.pQueueCreateInfos = &queueInfo;
     VkPhysicalDeviceFeatures available{};
     state->InstanceFunction<PFN_vkGetPhysicalDeviceFeatures>("vkGetPhysicalDeviceFeatures")(selected, &available);
-    require(available.vertexPipelineStoresAndAtomics && available.fragmentStoresAndAtomics, "graphics shader buffer writes and atomics are unavailable");
+    require(available.fragmentStoresAndAtomics, "graphics shader buffer writes and atomics are unavailable");
     VkPhysicalDeviceFeatures enabled{};
     enabled.shaderInt64 = VK_TRUE;
     enabled.shaderFloat64 = available.shaderFloat64 && floatControls.shaderSignedZeroInfNanPreserveFloat64;
@@ -1136,15 +1136,14 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     state->float64DenormPreserve = enabled.shaderFloat64 && floatControls.shaderDenormPreserveFloat64 == VK_TRUE &&
         floatControls.denormBehaviorIndependence == VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_ALL;
     if (state->float64DenormPreserve && std::find(state->capabilities.begin(), state->capabilities.end(), static_cast<std::uint32_t>(spv::CapabilityDenormPreserve)) == state->capabilities.end()) state->capabilities.push_back(spv::CapabilityDenormPreserve);
-    enabled.vertexPipelineStoresAndAtomics = VK_TRUE;
+    enabled.vertexPipelineStoresAndAtomics = available.vertexPipelineStoresAndAtomics;
     enabled.fragmentStoresAndAtomics = VK_TRUE;
     enabled.tessellationShader = available.tessellationShader;
     state->tessellationShader = enabled.tessellationShader == VK_TRUE;
     if (state->tessellationShader) state->capabilities.push_back(3);
     APS5_LOG_OUT("Vulkan features tessellationAvailable=%u mesh=%u depthClip=%u depthRangeUnrestricted=%u pipelineLibrary=%u", static_cast<unsigned>(state->tessellationShader), static_cast<unsigned>(state->meshShader), static_cast<unsigned>(state->depthClipControl), static_cast<unsigned>(state->depthRangeUnrestricted), static_cast<unsigned>(state->graphicsPipelineLibrary));
-    require(available.samplerAnisotropy && available.textureCompressionBC, "device lacks sampler anisotropy or BC texture compression support required for texture sampling");
-    enabled.samplerAnisotropy = VK_TRUE;
-    enabled.textureCompressionBC = VK_TRUE;
+    enabled.samplerAnisotropy = available.samplerAnisotropy;
+    enabled.textureCompressionBC = available.textureCompressionBC;
     // Guest shaders routinely read past descriptor ranges; robust access turns that into zeros
     // instead of a GPU fault that loses the device.
     enabled.robustBufferAccess = available.robustBufferAccess;
@@ -1211,8 +1210,8 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
         state->spirvExtensions.push_back("SPV_EXT_descriptor_indexing");
     }
     descriptorIndexingFeatures.descriptorBindingStorageBufferUpdateAfterBind = state->storageBufferUpdateAfterBind ? VK_TRUE : VK_FALSE;
-    state->samplerAnisotropy = true;
-    state->textureCompressionBC = true;
+    state->samplerAnisotropy = enabled.samplerAnisotropy == VK_TRUE;
+    state->textureCompressionBC = enabled.textureCompressionBC == VK_TRUE;
     deviceInfo.pEnabledFeatures = &enabled;
     deviceInfo.enabledExtensionCount = static_cast<std::uint32_t>(deviceExtensions.size());
     deviceInfo.ppEnabledExtensionNames = deviceExtensions.data();
