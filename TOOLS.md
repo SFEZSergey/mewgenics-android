@@ -39,6 +39,7 @@ su -c 'am force-stop org.anyps5.android'
 
 | Script | Purpose |
 |---|---|
+| `build_and_sign_apk.sh` | WSL Java/manifest build; `BASE_APK` reuses a prior signed APK's native payload and `OUTPUT_APK` selects the result path |
 | `github.sh` | Full build pipeline (steps 1–9); options are at the top of the file |
 | `mew-sdlgpu-shaders.sh` | Builds `$G/sdlgpu/*.spv` from game shaders (requires Python, glslang, and spirv-tools) |
 | `sdlgpu/glsl2spv.py` | Converts game GLSL to SPIR-V in SDL_GPU layout (for programs without ready-made SPIR-V) |
@@ -47,6 +48,7 @@ su -c 'am force-stop org.anyps5.android'
 | `mew1080.sh` | Patches `app.elf` to use 1080p instead of 4K (`undo` reverts the patch) |
 | `mew-native.sh` | Patches `app.elf` to use native `lzcnt` in the TLSF allocator (`undo` reverts the patch) |
 | `mew-atlas.sh` | Fixes the 4096 SWF atlas in `app.elf` to prevent chapter-video crashes (`undo` reverts the patch) |
+| `patch_app_elf.py --check <app.elf>` | Verifies all 41 supported Mewgenics patch sites without writing; the launcher reapplies and verifies them after Relinker and before each game start |
 | `sesscap.sh` | Passive session collector (root; started by `/data/adb/service.d/sesscap-start.sh`): FPS, threads, simpleperf, and screenshots every minute → `/data/local/tmp/sesscap/S<date>/` |
 | `jitmap.py` | Maps box64 dynarec blocks in a running process |
 | `psdis.sh` | Disassembles PSSL shaders (RDNA2 via `llvm-mc`) |
@@ -67,6 +69,8 @@ su -c 'am force-stop org.anyps5.android'
 | `APS5_SDLGPU_SKIP_FS=<hash,…>` / `APS5_SDLGPU_NEAREST_FS=<hash,…\|all>` | Debug: skip drawing a shader / use unfiltered samplers for a shader |
 | `APS5_SDLGPU_COUNTS=0` | Disable call counters in the log |
 | `APS5_SDLGPU_VERBOSE=1` | Enable verbose SDL logging |
+| `APS5_SDLGPU_ROBUST=0` | Disable Mali robust buffer/image access (enabled by default where Vulkan 1.3 supports it); `=1` opts in on other GPUs |
+| `APS5_SDLGPU_WAIT_EACH_SUBMIT=1` | Debug: wait for each game submit fence and enable render-pass/upload tracing; very slow |
 | `APS5_DUMP_TRIGGER=$G/dumpnow` | `touch $G/dumpnow` dumps a frame to `$G/frame_000.bmp` |
 | `APS5_NO_SUBMISSION_REAPER=1` | Disable the Agc-path submission reaper (it was causing heat) |
 

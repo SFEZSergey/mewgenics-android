@@ -379,9 +379,45 @@ index 35895a1..d4ccb04 100644
      errno = 0;
  
 diff --git a/src/libtools/threads.c b/src/libtools/threads.c
-index a7141d9..ae2b713 100644
+index a7141d9..cb43a68 100644
 --- a/src/libtools/threads.c
 +++ b/src/libtools/threads.c
+@@ -416,7 +416,7 @@ EXPORT int my_pthread_attr_getguardsize(x64emu_t* emu, pthread_attr_t* attr, siz
+ }
+ EXPORT int my_pthread_attr_getinheritsched(x64emu_t* emu, pthread_attr_t* attr, int* sched)
+ {
+-#ifndef TERMUX
++#if !defined(TERMUX) && !defined(ANDROID)
+ 	(void)emu;
+ 	PTHREAD_ATTR_ALIGN(attr);
+ 	return pthread_attr_getinheritsched(PTHREAD_ATTR(attr), sched);
+@@ -526,7 +526,7 @@ EXPORT int my_pthread_attr_setguardsize(x64emu_t* emu, pthread_attr_t* attr, siz
+ }
+ EXPORT int my_pthread_attr_setinheritsched(x64emu_t* emu, pthread_attr_t* attr, int sched)
+ {
+-#ifndef TERMUX
++#if !defined(TERMUX) && !defined(ANDROID)
+ 	(void)emu;
+ 	PTHREAD_ATTR_ALIGN(attr);
+ 	int ret = pthread_attr_setinheritsched(PTHREAD_ATTR(attr), sched);
+@@ -1072,7 +1072,7 @@ EXPORT int my_pthread_mutexattr_getkind_np(x64emu_t* emu, my_mutexattr_t *attr,
+ }
+ EXPORT int my_pthread_mutexattr_getprotocol(x64emu_t* emu, my_mutexattr_t *attr, void* p)
+ {
+-#ifndef TERMUX
++#if !defined(TERMUX) && !defined(ANDROID)
+ 	(void)emu;
+ 	my_mutexattr_t mattr = {0};
+ 	mattr.x86 = attr->x86;
+@@ -1136,7 +1136,7 @@ EXPORT int my_pthread_mutexattr_setprioceiling(x64emu_t* emu, my_mutexattr_t *at
+ }
+ EXPORT int my_pthread_mutexattr_setprotocol(x64emu_t* emu, my_mutexattr_t *attr, int p)
+ {
+-#ifndef TERMUX
++#if !defined(TERMUX) && !defined(ANDROID)
+ 	(void)emu;
+ 	my_mutexattr_t mattr = {0};
+ 	mattr.x86 = attr->x86;
 @@ -1229,33 +1229,29 @@ static void convert_glibc_mutex(void* m)
  		__atomic_compare_exchange_n((uint16_t*)m, &expected, bits, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
  	__atomic_store_n(kind, 0, __ATOMIC_RELAXED);
@@ -423,6 +459,38 @@ index a7141d9..ae2b713 100644
  #endif
  
  #define THRD_SUCCESS	0
+diff --git a/src/steam.c b/src/steam.c
+index c005eca..46646b4 100644
+--- a/src/steam.c
++++ b/src/steam.c
+@@ -6,7 +6,9 @@
+ #include <unistd.h>
+ #include <errno.h>
+ #include <fcntl.h>
++#ifndef ANDROID
+ #include <glob.h>
++#endif
+ #include <unistd.h>
+ 
+ #include "debug.h"
+@@ -40,6 +42,7 @@ static void create_lib_symlink(const char* lib)
+ 
+ static void create_libs_symlink(const char* folder)
+ {
++#ifndef ANDROID
+     glob_t g = {0};
+     char tmp[MAX_PATH] = {0};
+     // start with lib*.so.X.X.XXX
+@@ -63,6 +66,9 @@ static void create_libs_symlink(const char* folder)
+         }
+         globfree(&g);
+     }
++#else
++    (void)folder;
++#endif
+ }
+ 
+ void pressure_vessel(int argc, const char** argv, int nextarg, const char* prog)
 diff --git a/src/tools/aps5hot.c b/src/tools/aps5hot.c
 index 57fb4cc..3a09dff 100644
 --- a/src/tools/aps5hot.c
@@ -438,11 +506,12 @@ index 57fb4cc..3a09dff 100644
  
  #include "debug.h"
  #include "box64context.h"
-@@ -18,6 +22,10 @@
+@@ -18,6 +22,11 @@
  #include "custommem.h"
  #include "env.h"
  #include "aps5hot_sincos.h"
 +#include "aps5hot_faudio.h"
++#include "aps5hot_lz4.h"
 +#include "emu/x64emu_private.h"
 +#include "regs.h"
 +#include "callback.h"
@@ -584,7 +653,7 @@ index 57fb4cc..3a09dff 100644
  typedef struct aps5hot_s {
      const char* module;     // file name of the loaded module
      uintptr_t   offset;     // function address in the module
-@@ -57,8 +193,88 @@ static const aps5hot_t hot[] = {
+@@ -57,8 +193,90 @@ static const aps5hot_t hot[] = {
      {"libc.prx.guest.prx", 0x10430, 383, 0x9bbe0fbf4c4671e6ull, pFpiL, Aps5MemSet, "memset"},
      {"libc.prx.guest.prx", 0x4e2f0, 1213, 0xb530e8a466540be7ull, vFdpp, Aps5SinCos, "sincos"},
      {"libc.prx.guest.prx", 0x7f150, 62, 0xaae49931ef1d8a5full, iFppi, Aps5CompareExchange4, "cas4"},
@@ -606,6 +675,8 @@ index 57fb4cc..3a09dff 100644
 +    {"app.elf", 0x128e340, 759, 0x85b4be58126303f6ull, Aps5Wrap_fFppf, FaReverbProcessChannel, "faudio-reverb-channel"},
 +    {"app.elf", 0x12968c0, 350, 0x5e996309377c029dull, vFuuuppp, FaMix2in2out, "faudio-mix-2in-2out"},
 +    {"app.elf", 0x12957f0, 586, 0x819fa00e1b494a13ull, vFpuf, FaAmplify, "faudio-amplify"},
++    // LZ4FILE::readLZ4Stream calls this safe block decoder with (src, dst, srcSize, dstCapacity).
++    {"app.elf", 0x1073e50, 64, 0xd6c3bbcf5e49a000ull, Aps5Wrap_iFppii, Aps5Lz4DecompressSafe, "lz4-decompress-safe"},
 +    {"app.elf", 0x13ac1b0, 219, 0xd70e2335954a9f12ull, Aps5Wrap_SetViewport, Aps5AgcSetViewport, "agc-set-viewport"},
 +    {"app.elf", 0x1399e50, 52, 0x7a471e6518c16014ull, Aps5SdlGpuSlot6, Aps5AgcInitTexture, "agc-init-texture"},
 +    {"app.elf", 0x13a46b0, 32, 0x66b9a1f18511f060ull, Aps5SdlGpuSlot6, Aps5TableLookup, "table-lookup"},
@@ -979,7 +1050,7 @@ index f5bd3bd..543340d 100644
  	if (fun == &vFc) return 1;
  	if (fun == &vFw) return 1;
 diff --git a/src/wrapped/wrappedlibc.c b/src/wrapped/wrappedlibc.c
-index dd02bad..af50501 100644
+index 10c0f34..23990ee 100644
 --- a/src/wrapped/wrappedlibc.c
 +++ b/src/wrapped/wrappedlibc.c
 @@ -1062,6 +1062,9 @@ EXPORT uint64_t my__ITM_RU8(const uint64_t * a) { (void)a; printf("warning _ITM_
@@ -992,7 +1063,75 @@ index dd02bad..af50501 100644
  EXPORT void my_longjmp(x64emu_t* emu, /*struct __jmp_buf_tag __env[1]*/void *p, int32_t __val);
  EXPORT void my__longjmp(x64emu_t* emu, /*struct __jmp_buf_tag __env[1]*/void *p, int32_t __val) __attribute__((alias("my_longjmp")));
  EXPORT void my_siglongjmp(x64emu_t* emu, /*struct __jmp_buf_tag __env[1]*/void *p, int32_t __val) __attribute__((alias("my_longjmp")));
-@@ -3561,6 +3564,9 @@ void EXPORT my_longjmp(x64emu_t* emu, /*struct __jmp_buf_tag __env[1]*/void *p,
+@@ -3230,6 +3233,31 @@ EXPORT int32_t my_execlp(x64emu_t* emu, const char* path)
+     return my_execvp(emu, path, argv);
+ }
+ 
++#ifdef ANDROID
++static int aps5_android_posix_spawn(pid_t* pid, const char* path,
++    const posix_spawn_file_actions_t* actions, const posix_spawnattr_t* attrp,
++    char* const argv[], char* const envp[])
++{
++    typedef int (*spawn_fn_t)(pid_t*, const char*, const posix_spawn_file_actions_t*,
++                              const posix_spawnattr_t*, char* const[], char* const[]);
++    spawn_fn_t spawn_fn = (spawn_fn_t)dlsym(RTLD_DEFAULT, "posix_spawn");
++    return spawn_fn ? spawn_fn(pid, path, actions, attrp, argv, envp) : ENOSYS;
++}
++
++static int aps5_android_posix_spawnp(pid_t* pid, const char* path,
++    const posix_spawn_file_actions_t* actions, const posix_spawnattr_t* attrp,
++    char* const argv[], char* const envp[])
++{
++    typedef int (*spawn_fn_t)(pid_t*, const char*, const posix_spawn_file_actions_t*,
++                              const posix_spawnattr_t*, char* const[], char* const[]);
++    spawn_fn_t spawn_fn = (spawn_fn_t)dlsym(RTLD_DEFAULT, "posix_spawnp");
++    return spawn_fn ? spawn_fn(pid, path, actions, attrp, argv, envp) : ENOSYS;
++}
++#else
++#define aps5_android_posix_spawn posix_spawn
++#define aps5_android_posix_spawnp posix_spawnp
++#endif
++
+ EXPORT int32_t my_posix_spawn(x64emu_t* emu, pid_t* pid, const char* fullpath,
+     const posix_spawn_file_actions_t *actions, const posix_spawnattr_t* attrp,  char* const argv[], char* const envp[])
+ {
+@@ -3263,7 +3291,7 @@ EXPORT int32_t my_posix_spawn(x64emu_t* emu, pid_t* pid, const char* fullpath,
+             newargv[toadd] = fullpath;
+         }
+         printf_log(/*LOG_DEBUG*/LOG_INFO, " => posix_spawn(%p, \"%s\", %p, %p, %p [\"%s\", \"%s\", \"%s\"...:%d], %p)\n", pid, newargv[0], actions, attrp, newargv, newargv[0], newargv[1], newargv[2]?newargv[2]:"", n, envp);
+-        ret = posix_spawn(pid, newargv[0], actions, attrp, (char* const*)newargv, spawn_envp);
++        ret = aps5_android_posix_spawn(pid, newargv[0], actions, attrp, (char* const*)newargv, spawn_envp);
+         if (spawn_envp != envp) {
+             box_free(arg0_env);
+             box_free(spawn_envp);
+@@ -3271,7 +3299,7 @@ EXPORT int32_t my_posix_spawn(x64emu_t* emu, pid_t* pid, const char* fullpath,
+         printf_log(/*LOG_DEBUG*/LOG_INFO, "posix_spawn returned %d\n", ret);
+         //box_free(newargv);
+     } else
+-        ret = posix_spawn(pid, fullpath, actions, attrp, argv, envp);
++        ret = aps5_android_posix_spawn(pid, fullpath, actions, attrp, argv, envp);
+     return ret;
+ }
+ 
+@@ -3312,7 +3340,7 @@ EXPORT int32_t my_posix_spawnp(x64emu_t* emu, pid_t* pid, const char* path,
+             newargv[toadd] = fullpath;
+         }
+         printf_log(/*LOG_DEBUG*/LOG_INFO, " => posix_spawn(%p, \"%s\", %p, %p, %p [\"%s\", \"%s\", \"%s\"...:%d], %p)\n", pid, newargv[0], actions, attrp, newargv, newargv[0], newargv[1], newargv[2]?newargv[2]:"", n, envp);
+-        ret = posix_spawn(pid, newargv[0], actions, attrp, (char* const*)newargv, spawn_envp);
++        ret = aps5_android_posix_spawn(pid, newargv[0], actions, attrp, (char* const*)newargv, spawn_envp);
+         if (spawn_envp != envp) {
+             box_free(arg0_env);
+             box_free(spawn_envp);
+@@ -3320,7 +3348,7 @@ EXPORT int32_t my_posix_spawnp(x64emu_t* emu, pid_t* pid, const char* path,
+         printf_log(/*LOG_DEBUG*/LOG_INFO, "posix_spawn returned %d\n", ret);
+         //box_free(newargv);
+     } else
+-        ret = posix_spawnp(pid, path, actions, attrp, argv, envp);
++        ret = aps5_android_posix_spawnp(pid, path, actions, attrp, argv, envp);
+     box_free(fullpath);
+     return ret;
+ }
+@@ -3561,6 +3589,9 @@ void EXPORT my_longjmp(x64emu_t* emu, /*struct __jmp_buf_tag __env[1]*/void *p,
      R_RAX = __val?__val:1;
      R_RIP = jpbuff->save_rip;
      if(((__jmp_buf_tag_t*)p)->__mask_was_saved) {
@@ -1002,7 +1141,7 @@ index dd02bad..af50501 100644
          sigprocmask(SIG_SETMASK, &((__jmp_buf_tag_t*)p)->__saved_mask, NULL);
      }
      if(emu->flags.quitonlongjmp) {
-@@ -3582,6 +3588,9 @@ EXPORT int32_t my___sigsetjmp(x64emu_t* emu, /*struct __jmp_buf_tag __env[1]*/vo
+@@ -3582,6 +3613,9 @@ EXPORT int32_t my___sigsetjmp(x64emu_t* emu, /*struct __jmp_buf_tag __env[1]*/vo
      jpbuff->save_rsp = R_RSP+sizeof(uintptr_t); // include "return address"
      jpbuff->save_rip = *(uintptr_t*)(R_RSP);
      if(savesigs) {
@@ -1012,7 +1151,7 @@ index dd02bad..af50501 100644
          if(sigprocmask(SIG_SETMASK, NULL, &((__jmp_buf_tag_t*)p)->__saved_mask))
              ((__jmp_buf_tag_t*)p)->__mask_was_saved = 0;
          else
-@@ -3595,6 +3604,13 @@ EXPORT int32_t my___sigsetjmp(x64emu_t* emu, /*struct __jmp_buf_tag __env[1]*/vo
+@@ -3595,6 +3629,13 @@ EXPORT int32_t my___sigsetjmp(x64emu_t* emu, /*struct __jmp_buf_tag __env[1]*/vo
      }
      return 0;
  }
@@ -1043,10 +1182,10 @@ index 84a7e7e..0d6a344 100644
  GO(sigrelse, iFi)
  GOW(sigreturn, iFp)
 diff --git a/src/wrapped/wrappedlibpthread.c b/src/wrapped/wrappedlibpthread.c
-index 91330f2..5d0b2ef 100644
+index 91330f2..f4b3b44 100644
 --- a/src/wrapped/wrappedlibpthread.c
 +++ b/src/wrapped/wrappedlibpthread.c
-@@ -78,4 +78,14 @@ extern int __pthread_rwlock_wrlock(void*);
+@@ -78,4 +78,13 @@ extern int __pthread_rwlock_wrlock(void*);
  extern int __pthread_setspecific(size_t, void*);
  #endif
  
@@ -1060,7 +1199,6 @@ index 91330f2..5d0b2ef 100644
 +#endif
 +
  #include "wrappedlib_init.h"
-+
 diff --git a/src/wrapped/wrappedlibpthread_private.h b/src/wrapped/wrappedlibpthread_private.h
 index 187b5e8..244826f 100644
 --- a/src/wrapped/wrappedlibpthread_private.h
@@ -1098,3 +1236,107 @@ index 187b5e8..244826f 100644
  GO(pthread_spin_destroy, iFp)
  GO(pthread_spin_init, iFpi)
  GO(pthread_spin_lock, iFp)
+
+diff --git a/src/tools/aps5hot_lz4.h b/src/tools/aps5hot_lz4.h
+new file mode 100644
+index 0000000..0000000
+--- /dev/null
++++ b/src/tools/aps5hot_lz4.h
+@@ -0,0 +1,97 @@
++// SPDX-License-Identifier: Zlib
++// ARM64 safe LZ4 block decoder for the Mewgenics app.elf decoder entry.
++#ifndef APS5HOT_LZ4_H
++#define APS5HOT_LZ4_H
++
++#include <stdint.h>
++#include <string.h>
++#include "emu/x64emu_private.h"
++#include "regs.h"
++
++static int Aps5Lz4DecompressSafe(const uint8_t* src, uint8_t* dst, int src_size, int dst_capacity)
++{
++    if (!src || src_size < 0 || dst_capacity < 0 || (!dst && dst_capacity != 0))
++        return -1;
++    if (dst_capacity == 0) {
++        if (src_size == 0)
++            return 0;
++        return src_size == 1 && src[0] == 0 ? 0 : -1;
++    }
++    if (src_size == 0)
++        return -1;
++
++    size_t input = 0;
++    size_t output = 0;
++    const size_t input_size = (size_t)src_size;
++    const size_t output_capacity = (size_t)dst_capacity;
++
++    while (input < input_size) {
++        const uint8_t token = src[input++];
++        size_t literal_length = token >> 4;
++        if (literal_length == 15) {
++            uint8_t extension;
++            do {
++                if (input == input_size || literal_length > SIZE_MAX - 255)
++                    return -1;
++                extension = src[input++];
++                literal_length += extension;
++            } while (extension == 255);
++        }
++        if (literal_length > input_size - input || literal_length > output_capacity - output)
++            return -1;
++        memcpy(dst + output, src + input, literal_length);
++        input += literal_length;
++        output += literal_length;
++
++        // The last sequence may contain only literals.
++        if (input == input_size)
++            return (int)output;
++        if (input_size - input < 2)
++            return -1;
++
++        const size_t offset = (size_t)src[input] | (size_t)src[input + 1] << 8;
++        input += 2;
++        if (offset == 0 || offset > output)
++            return -1;
++
++        size_t match_length = (token & 0x0f) + 4;
++        if ((token & 0x0f) == 15) {
++            uint8_t extension;
++            do {
++                if (input == input_size || match_length > SIZE_MAX - 255)
++                    return -1;
++                extension = src[input++];
++                match_length += extension;
++            } while (extension == 255);
++        }
++        if (match_length > output_capacity - output)
++            return -1;
++
++        // Copy a non-overlapping seed, then grow it by doubling for repeated matches.
++        if (offset >= match_length) {
++            memcpy(dst + output, dst + output - offset, match_length);
++        } else {
++            memcpy(dst + output, dst + output - offset, offset);
++            size_t copied = offset;
++            while (copied < match_length) {
++                size_t amount = copied;
++                if (amount > match_length - copied)
++                    amount = match_length - copied;
++                memcpy(dst + output + copied, dst + output, amount);
++                copied += amount;
++            }
++        }
++        output += match_length;
++    }
++    return (int)output;
++}
++
++static void Aps5Wrap_iFppii(x64emu_t* emu, uintptr_t fcn)
++{
++    (void)emu;
++    (void)fcn;
++    R_RAX = (uint32_t)Aps5Lz4DecompressSafe((const uint8_t*)R_RDI, (uint8_t*)R_RSI,
++                                            (int32_t)R_RDX, (int32_t)R_RCX);
++}
++
++#endif

@@ -6,7 +6,9 @@ ROOT="/mnt/c/Mewgenics"
 WORKDIR="/tmp/mewgenics_build"
 PLATFORM_JAR="/opt/android/sdk/platforms/android-35/android.jar"
 R8_JAR="/opt/android/r8.jar"
-SRC_APK="$ROOT/Mewgenics.apk"
+SRC_APK="${BASE_APK:-$ROOT/Mewgenics.apk}"
+OUTPUT_APK="${OUTPUT_APK:-$SRC_APK}"
+export SRC_APK OUTPUT_APK
 KEYSTORE="$ROOT/android/debug.keystore"
 
 echo "=== 1. Очистка и подготовка $WORKDIR ==="
@@ -28,9 +30,10 @@ ls -lh "$WORKDIR/classes.dex"
 echo "=== 5. Замена classes.dex, libaps5sdlgpu.so и shims в APK ==="
 python3 - << 'PYEOF'
 import zipfile
+import os
 from pathlib import Path
 
-src = Path("/mnt/c/Mewgenics/Mewgenics.apk")
+src = Path(os.environ["SRC_APK"])
 unsigned = Path("/tmp/mewgenics_build/unsigned.apk")
 dex = Path("/tmp/mewgenics_build/classes.dex").read_bytes()
 sdlgpu_path = Path("/mnt/c/Mewgenics/android/sdlgpu/libaps5sdlgpu.so")
@@ -70,7 +73,7 @@ zipalign -f -p 4 "$WORKDIR/unsigned.apk" "$WORKDIR/aligned.apk"
 echo "=== 7. Подпись APK (apksigner) ==="
 apksigner sign --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true \
   --ks "$KEYSTORE" --ks-pass pass:android --key-pass pass:android \
-  --ks-key-alias androiddebugkey --out "$SRC_APK" "$WORKDIR/aligned.apk"
+  --ks-key-alias androiddebugkey --out "$OUTPUT_APK" "$WORKDIR/aligned.apk"
 
-apksigner verify "$SRC_APK"
-echo "=== УСПЕШНО СОБРАН И ПОДПИСАН: $SRC_APK ==="
+apksigner verify "$OUTPUT_APK"
+echo "=== УСПЕШНО СОБРАН И ПОДПИСАН: $OUTPUT_APK ==="

@@ -28,6 +28,7 @@ extern bool Aps5SdlGpu_VulkanSupportsTextureFormat(SDL_GPURenderer *renderer, SD
 static SDL_GPUDevice real;
 static bool tracing;       // APS5_SDLGPU_TRACE=1: pass shapes, viewports, scissors, pipelines, uploads in the log
 static bool targetMipsOn;  // APS5_SDLGPU_TARGET_MIPS=1
+static bool waitEachSubmit; // APS5_SDLGPU_WAIT_EACH_SUBMIT=1: wait on every game command buffer fence
 static SDL_GPUTexture *tableTexture;  // bitmap_atlas_info, see noteTableTexture
 static SDL_GPUBuffer *tableBuffer;
 static Uint32 tableBytes;
@@ -441,7 +442,7 @@ static void limitFps(void)
     clock_gettime(CLOCK_MONOTONIC, &lastPresentTime);
 }
 
-static uint64_t submitFrame(uint64_t a0, uint64_t (*submit)(uint64_t))
+static uint64_t submitFrame(uint64_t a0, uint64_t (*submit)(uint64_t), bool returnsFence)
 {
     texDump((SDL_GPUCommandBuffer *)(uintptr_t)a0);
     dumpCounts();
@@ -449,7 +450,27 @@ static uint64_t submitFrame(uint64_t a0, uint64_t (*submit)(uint64_t))
     SDL_GPURenderer *renderer = real.driverData;
     const bool presenting = finishPresent(a0, true);
     const bool dump = presenting && dumpWanted() && recordDump(cb);
-    const uint64_t result = submit(a0);
+    uint64_t result;
+    if (waitEachSubmit) {
+        static Uint64 sequence;
+        const Uint64 current = __atomic_add_fetch(&sequence, 1, __ATOMIC_RELAXED);
+        struct timespec before, after;
+        clock_gettime(CLOCK_MONOTONIC, &before);
+        fprintf(stderr, "[sdlgpu] submit #%llu begin (present=%d)\\n", (unsigned long long)current, presenting);
+        SDL_GPUFence *fence = returnsFence ? (SDL_GPUFence *)(uintptr_t)submit(a0) : real.SubmitAndAcquireFence(cb);
+        bool signaled = false;
+        if (fence) {
+            signaled = real.WaitForFences(renderer, true, &fence, 1);
+            if (!returnsFence) real.ReleaseFence(renderer, fence);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &after);
+        const double waitMs = (double)(after.tv_sec - before.tv_sec) * 1000.0 + (double)(after.tv_nsec - before.tv_nsec) / 1000000.0;
+        fprintf(stderr, "[sdlgpu] submit #%llu fence=%s wait=%.2f ms\\n", (unsigned long long)current,
+                fence ? (signaled ? "signaled" : "wait-failed") : "missing", waitMs);
+        result = returnsFence ? (uint64_t)(uintptr_t)fence : (uint64_t)signaled;
+    } else {
+        result = submit(a0);
+    }
     if (presenting) {
         countPresent();
         limitFps();
@@ -459,11 +480,11 @@ static uint64_t submitFrame(uint64_t a0, uint64_t (*submit)(uint64_t))
 }
 static uint64_t L_Submit(uint64_t a0)
 {
-    return submitFrame(a0, A_Submit);
+    return submitFrame(a0, A_Submit, false);
 }
 static uint64_t L_SubmitAndAcquireFence(uint64_t a0)
 {
-    return submitFrame(a0, A_SubmitAndAcquireFence);
+    return submitFrame(a0, A_SubmitAndAcquireFence, true);
 }
 static uint64_t L_Cancel(uint64_t a0)
 {
@@ -1251,6 +1272,11 @@ static void installOverrides(SDL_GPUDevice *device)
 {
     const char *size = getenv("APS5_SDLGPU_CANVAS");  // WxH of the title's canvas; 0 = no letterbox
     if (size && sscanf(size, "%ux%u", &canvasW, &canvasH) != 2) canvasW = canvasH = 0;
+    waitEachSubmit = getenv("APS5_SDLGPU_WAIT_EACH_SUBMIT") != NULL;
+    if (waitEachSubmit) {
+        tracing = true;
+        fprintf(stderr, "[sdlgpu] waiting for each submitted game command buffer; pass and upload tracing enabled\\n");
+    }
     if (!presentLock) presentLock = SDL_CreateMutex();
     if (canvasW && canvasH) {
         device->AcquireSwapchainTexture = (void *)L_AcquireSwapchainTexture;

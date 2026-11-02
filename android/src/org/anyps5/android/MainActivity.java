@@ -39,6 +39,8 @@ public final class MainActivity extends Activity {
     private TextView status, title, subtitle;
     private Button start;
     private android.widget.ImageView icon;
+    private final Object elfPatchLock = new Object();
+    private boolean elfPatchCheckRunning;
 
     static { System.loadLibrary("anyps5_android"); }
     private static native String nativeGetStatus();
@@ -715,7 +717,28 @@ public final class MainActivity extends Activity {
     private void showStatus() {
         File gameDir = activeGame();
         if (new File(gameDir, "app.elf").isFile() && new File(gameDir, "libs").isDirectory()) {
-            status.setText(t("Игра готова", "Game is ready") + "\n" + runtimeStatus());
+            File elf = new File(gameDir, "app.elf");
+            String details = runtimeStatus();
+            String id = readTitleId(gameDir);
+            if ("PPSA37318".equals(id) || elf.length() > 30000000) {
+                String patchLine;
+                boolean checking;
+                synchronized (elfPatchLock) { checking = elfPatchCheckRunning; }
+                if (checking) {
+                    patchLine = t("Автоматическая проверка игры…", "Checking game optimization…");
+                } else {
+                    ElfPatchStatus patches = inspectMewgenicsElf(elf, false);
+                    if (patches.isComplete()) {
+                        patchLine = t("Автоматическая проверка игры завершена", "Automatic game check complete");
+                    } else if (patches.incompatible > 0 || patches.error != null) {
+                        patchLine = t("Автопатч не поддерживает эту версию игры; файл не изменён", "This game version is not supported by the automatic patch; the file was not changed");
+                    } else {
+                        patchLine = t("Оптимизация игры будет применена автоматически", "Game optimization will be applied automatically");
+                    }
+                }
+                details += "\n" + patchLine;
+            }
+            status.setText(t("Игра готова", "Game is ready") + "\n" + details);
             start.setText(t("Играть", "Play")); start.setEnabled(true); return;
         }
         if (findExecutableOrEboot(gameDir) != null) {
@@ -812,7 +835,31 @@ public final class MainActivity extends Activity {
     @Override protected void onResume() {
         super.onResume();
         ensureActiveGame();
+        checkActiveGamePatchAsync();
         refreshGameDisplay();
+    }
+
+    private void checkActiveGamePatchAsync() {
+        final File game = activeGame();
+        final File elf = new File(game, "app.elf");
+        String id = readTitleId(game);
+        if (id == null) id = game.getName();
+        if (!elf.isFile() || !("PPSA37318".equals(id) || elf.length() > 30000000)) return;
+        synchronized (elfPatchLock) {
+            if (elfPatchCheckRunning) return;
+            elfPatchCheckRunning = true;
+        }
+        Thread checker = new Thread(new Runnable() { @Override public void run() {
+            try {
+                patchGameElf(game);
+            } finally {
+                runOnUiThread(new Runnable() { @Override public void run() {
+                    synchronized (elfPatchLock) { elfPatchCheckRunning = false; }
+                    if (!isFinishing()) showStatus();
+                }});
+            }
+        }}, "app-elf-auto-patch");
+        checker.start();
     }
     private void showLibrary() {
         final java.util.List<File> list = games();
@@ -1772,10 +1819,28 @@ public final class MainActivity extends Activity {
         final byte[] orig;
         final byte[] patch;
         ElfPatch(long offset, String origHex, String patchHex) {
+            this(offset, origHex, patchHex, 0);
+        }
+        ElfPatch(long offset, String origHex, String patchHex, int nopPad) {
             this.offset = offset;
             this.orig = hexToBytes(origHex);
-            this.patch = hexToBytes(patchHex);
+            byte[] p = hexToBytes(patchHex);
+            if (nopPad > 0) {
+                this.patch = new byte[p.length + nopPad];
+                System.arraycopy(p, 0, this.patch, 0, p.length);
+                java.util.Arrays.fill(this.patch, p.length, this.patch.length, (byte) 0x90);
+            } else {
+                this.patch = p;
+            }
         }
+    }
+
+    private static final class ElfPatchStatus {
+        int patched;
+        int pending;
+        int incompatible;
+        String error;
+        boolean isComplete() { return error == null && pending == 0 && incompatible == 0 && patched == MEWGENICS_PATCHES.length; }
     }
 
     private static byte[] hexToBytes(String s) {
@@ -1834,31 +1899,70 @@ public final class MainActivity extends Activity {
         new ElfPatch(14837364L, "0fb78528ffffff", "0fbf8528ffffff")
     };
 
-    private void patchMewgenicsElf(File elf) {
-        if (!elf.isFile()) return;
+    private ElfPatchStatus inspectMewgenicsElf(File elf, boolean apply) {
+        ElfPatchStatus result = new ElfPatchStatus();
+        if (elf == null || !elf.isFile()) {
+            result.error = "app.elf is missing";
+            return result;
+        }
         boolean modified = false;
-        try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(elf, "rw")) {
-            long len = raf.length();
+        try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(elf, apply ? "rw" : "r")) {
+            if (raf.length() < 64) throw new Exception("ELF header is truncated");
+            byte[] header = new byte[20];
+            raf.seek(0);
+            raf.readFully(header);
+            if (header[0] != 0x7f || header[1] != 'E' || header[2] != 'L' || header[3] != 'F' || header[4] != 2 || header[5] != 1 || u16(header, 18) != 62)
+                throw new Exception("expected little-endian ELF64 x86-64");
+
+            java.util.ArrayList<ElfPatch> pending = new java.util.ArrayList<>();
             for (ElfPatch p : MEWGENICS_PATCHES) {
-                if (p.offset + p.orig.length > len) continue;
+                if (p.offset + p.orig.length > raf.length()) {
+                    result.incompatible++;
+                    continue;
+                }
                 raf.seek(p.offset);
                 byte[] cur = new byte[p.orig.length];
                 raf.readFully(cur);
-                if (java.util.Arrays.equals(cur, p.patch)) continue;
-                if (java.util.Arrays.equals(cur, p.orig)) {
+                if (java.util.Arrays.equals(cur, p.patch)) result.patched++;
+                else if (java.util.Arrays.equals(cur, p.orig)) pending.add(p);
+                else result.incompatible++;
+            }
+
+            // Preflight the whole patch set before writing. A new game build or Relinker output must
+            // never receive a partial set of offsets that only happens to match by chance.
+            if (apply && result.incompatible == 0) {
+                for (ElfPatch p : pending) {
                     raf.seek(p.offset);
                     raf.write(p.patch);
                     modified = true;
                 }
+                if (modified) raf.getFD().sync();
+                result.patched = 0;
+                result.pending = 0;
+                for (ElfPatch p : MEWGENICS_PATCHES) {
+                    raf.seek(p.offset);
+                    byte[] cur = new byte[p.patch.length];
+                    raf.readFully(cur);
+                    if (java.util.Arrays.equals(cur, p.patch)) result.patched++;
+                    else result.pending++;
+                }
+                if (result.patched != MEWGENICS_PATCHES.length) result.error = "post-patch verification failed";
+            } else {
+                result.pending = pending.size();
             }
         } catch (Exception e) {
-            android.util.Log.e("AnyPS5", "patchMewgenicsElf error", e);
+            result.error = e.getMessage() == null ? e.toString() : e.getMessage();
+            android.util.Log.e("AnyPS5", "app.elf patch check failed", e);
         }
         if (modified) {
             File cacheDir = new File(getFilesDir(), ".cache/box64");
             File[] files = cacheDir.listFiles();
             if (files != null) for (File f : files) if (f.getName().contains("app.elf")) f.delete();
         }
+        android.util.Log.i("AnyPS5", "app.elf patches: " + result.patched + "/" + MEWGENICS_PATCHES.length
+                + " verified, " + result.pending + " pending, " + result.incompatible + " incompatible"
+                + (result.error == null ? "" : " (" + result.error + ")"));
+        return result;
     }
 
     private void extractGameShaders(File game, String titleId) {
@@ -1910,14 +2014,15 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private void patchGameElf(File game) {
-        if (game == null) return;
+    private ElfPatchStatus patchGameElf(File game) {
+        if (game == null) return null;
         String id = readTitleId(game);
         if (id == null) id = game.getName();
         File elf = new File(game, "app.elf");
         if (elf.isFile() && ("PPSA37318".equals(id) || elf.length() > 30000000)) {
-            patchMewgenicsElf(elf);
+            synchronized (elfPatchLock) { return inspectMewgenicsElf(elf, true); }
         }
+        return null;
     }
 
     private void postRelinkGame(File game) {

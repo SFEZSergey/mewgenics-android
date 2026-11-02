@@ -10,8 +10,15 @@ Tested on Snapdragon 8 Elite (Adreno 830), reaching stable 60 FPS in combat.
 
 ## Releases & Downloads
 
-- **Current Version:** `v0.1.7-beta`
-- **Download APK:** [`Mewgenics.apk`](https://github.com/SFEZSergey/mewgenics-android/releases/tag/v0.1.7-Beta) from GitHub Releases
+- **Current Version:** `v0.1.10-beta`
+- **Download APK:** [`Mewgenics-0.1.10-beta.apk`](https://github.com/SFEZSergey/mewgenics-android/releases/download/v0.1.10-Beta/Mewgenics-0.1.10-beta.apk)
+
+### Changes in v0.1.10-beta
+* **Automatic game patching:** The launcher checks and applies the complete supported `app.elf` patch set in the background whenever it opens or resumes, and verifies the result before starting the game.
+* **Safer patching:** Patch signatures are checked as a complete set before writing, and the `patch_app_elf.py --check` command verifies a file without modifying it.
+* **Native ARM64 LZ4 decoder:** Box64 redirects the signature-checked Mewgenics block decoder to a bounds-checked ARM64 implementation while preserving the game's wrapper and allocation logic.
+* **Mali diagnostics:** Added optional Vulkan robust buffer/image access handling for Mali and a slow per-submit fence tracing mode for graphics diagnostics.
+* **ELF analysis tools:** Added a read-only app.elf inventory and profile-correlation script, with notes about address and profiling limits.
 
 ### Key Features in v0.1.7-beta:
 * **MediaTek & ARM Mali GPU Support:** Fixed startup crashes on MediaTek (Dimensity, MT6899, etc.) and ARM Mali GPUs (Mali-G720 / Immortalis). Relaxed strict desktop Vulkan feature requirements (`sampleRateShading`, `depthClamp`, `drawIndirectFirstInstance`, `shaderClipDistance`) and enabled compatibility with core Vulkan 1.1+ drivers without requiring optional extensions (`VK_KHR_maintenance1`).

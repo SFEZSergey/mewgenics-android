@@ -116,6 +116,46 @@ feat_new = '''    {
                 deviceFeatures.depthClamp, deviceFeatures.shaderClipDistance,
                 deviceFeatures.drawIndirectFirstInstance, deviceFeatures.sampleRateShading,
                 deviceFeatures.samplerAnisotropy);
+
+        // Mali-G720's first-frame GPU fault can be caused by an out-of-range shader buffer/image
+        // access. Enable Vulkan robustness on Mali when supported; APS5_SDLGPU_ROBUST=0 opts out,
+        // while =1 enables the same diagnostic mode on other devices.
+        const char *robustEnv = getenv("APS5_SDLGPU_ROBUST");
+        const bool robustRequested = robustEnv ? strcmp(robustEnv, "0") != 0 : (strstr(devProps.deviceName, "Mali") != NULL);
+        VkBool32 robustBufferEnabled = VK_FALSE;
+        VkBool32 robustImageEnabled = VK_FALSE;
+        if (robustRequested) {
+            if (deviceFeatures.robustBufferAccess) {
+                features->desiredVulkan10DeviceFeatures.robustBufferAccess = VK_TRUE;
+                robustBufferEnabled = VK_TRUE;
+            }
+            if (devProps.apiVersion >= VK_MAKE_VERSION(1, 3, 0)) {
+                VkPhysicalDeviceVulkan13Features supported13 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
+                VkPhysicalDeviceFeatures2 supported = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &supported13 };
+                renderer->vkGetPhysicalDeviceFeatures2(physicalDevice, &supported);
+                if (supported13.robustImageAccess) {
+                    if (!features->usesCustomVulkanOptions) {
+                        features->usesCustomVulkanOptions = true;
+                        features->desiredApiVersion = VK_MAKE_VERSION(1, 3, 0);
+                        SDL_zero(features->desiredVulkan11DeviceFeatures);
+                        SDL_zero(features->desiredVulkan12DeviceFeatures);
+                        SDL_zero(features->desiredVulkan13DeviceFeatures);
+                        features->desiredVulkan11DeviceFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+                        features->desiredVulkan12DeviceFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+                        features->desiredVulkan13DeviceFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+                    }
+                    const Uint32 apiMajor = VK_API_VERSION_MAJOR(features->desiredApiVersion);
+                    const Uint32 apiMinor = VK_API_VERSION_MINOR(features->desiredApiVersion);
+                    if (apiMajor > 1 || (apiMajor == 1 && apiMinor >= 3)) {
+                        features->desiredVulkan13DeviceFeatures.robustImageAccess = VK_TRUE;
+                        robustImageEnabled = VK_TRUE;
+                    }
+                }
+            }
+        }
+        if (robustRequested)
+            fprintf(stderr, "[sdlgpu] robustness requested: buffer=%u image=%u (device %s)\\n",
+                    robustBufferEnabled, robustImageEnabled, devProps.deviceName);
     }
 
     // Clamp desired features to what hardware actually supports instead of rejecting device
